@@ -1,0 +1,1 @@
+// Extends req.user type
