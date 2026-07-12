@@ -1,16 +1,14 @@
 import "dotenv/config";
 import app from "./app.js";
-import mongoose from "mongoose";
+import connectDB from "./config/db.js";
 
-const PORT: number = process.env.PORT ? Number(process.env.PORT) : 5000;
-
-mongoose
-  .connect("mongodb://127.0.0.1:27017/localserve")
-  .then((): void => {
-    app.listen(PORT, (): void => {
-      console.log(`app is listening at PORT ${PORT}`);
-    });
-  })
-  .catch((): void => {
-    console.log("Failed to connect with DB. Internal Server error.");
+console.log('Starting server...');
+connectDB().then(() => {
+  const PORT = process.env.PORT || 5000;
+  console.log(`Connecting to DB successful, listening on ${PORT}`);
+  app.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
   });
+}).catch(err => {
+  console.error('Failed to start server:', err);
+});
