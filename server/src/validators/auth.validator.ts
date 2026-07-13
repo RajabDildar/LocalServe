@@ -1,11 +1,11 @@
 import { z } from "zod";
-import { AVAILABLE_ROLES } from "../utils/constants";
+import { PUBLIC_REGISTRATION_ROLES } from "../utils/constants";
 
 export const registerSchema = z.object({
   name: z.string().min(2, "Name must be at least 2 characters"),
   email: z.string().email("Invalid email address"),
   password: z.string().min(8, "Password must be at least 8 characters"),
-  role: z.enum(AVAILABLE_ROLES as [string, ...string[]]),
+  role: z.enum(PUBLIC_REGISTRATION_ROLES as [string, ...string[]]),
   phone: z.string().optional(),
 });
 

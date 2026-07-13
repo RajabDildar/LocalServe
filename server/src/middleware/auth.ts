@@ -16,7 +16,7 @@ export const protect = asyncHandler(
     if (!user || !user.isActive)
       throw new ApiError(401, "User not found or suspended");
 
-    (req as any).user = user;
+    req.user = user;
     next();
   },
 );
@@ -24,7 +24,7 @@ export const protect = asyncHandler(
 export const requireRole =
   (...roles: string[]) =>
   (req: Request, res: Response, next: NextFunction) => {
-    if (!roles.includes((req as any).user.role)) {
+    if (!req.user || !roles.includes(req.user.role)) {
       throw new ApiError(403, "Forbidden");
     }
     next();

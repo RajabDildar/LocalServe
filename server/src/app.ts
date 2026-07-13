@@ -5,6 +5,8 @@ import cookieParser from "cookie-parser";
 import { env } from "./config/env";
 import authRoutes from "./routes/auth.routes";
 import { globalErrorHandler } from "./middleware/errorHandler";
+import { sanitizeBody } from "./middleware/sanitize";
+import { apiLimiter } from "./middleware/rateLimiter";
 
 const app = express();
 
@@ -13,6 +15,8 @@ app.use(helmet());
 app.use(cors({ origin: env.CLIENT_URL, credentials: true }));
 app.use(express.json({ limit: "10kb" }));
 app.use(cookieParser());
+app.use(sanitizeBody);
+app.use("/api", apiLimiter);
 
 // Routes
 app.use("/api/auth", authRoutes);

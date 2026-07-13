@@ -8,8 +8,11 @@ import {
   resetPasswordSchema,
 } from "../validators/auth.validator";
 import { protect } from "../middleware/auth";
+import { authLimiter } from "../middleware/rateLimiter";
 
 const router = Router();
+
+router.use(authLimiter);
 
 router.post("/register", validate(registerSchema), authController.register);
 router.post("/login", validate(loginSchema), authController.login);

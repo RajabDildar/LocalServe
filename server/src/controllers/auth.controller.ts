@@ -28,6 +28,7 @@ export const register = asyncHandler(async (req: Request, res: Response) => {
       .createHash("sha256")
       .update(verificationToken)
       .digest("hex"),
+    verificationTokenExpires: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24h
   });
 
   await emailService.sendVerificationEmail(email, verificationToken);
@@ -54,7 +55,8 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
 
   if (!user.isVerified) throw new ApiError(401, "Please verify your email");
 
-  if (!user.isActive) throw new ApiError(401, "Your account has been suspended");
+  if (!user.isActive)
+    throw new ApiError(401, "Your account has been suspended");
 
   const accessToken = authService.generateAccessToken(user);
   const refreshToken = authService.generateRefreshToken(user);
@@ -79,7 +81,7 @@ export const login = asyncHandler(async (req: Request, res: Response) => {
 });
 
 export const getMe = asyncHandler(async (req: Request, res: Response) => {
-  res.json(new ApiResponse({ statusCode: 200, data: (req as any).user }));
+  res.json(new ApiResponse({ statusCode: 200, data: req.user }));
 });
 
 export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
@@ -88,18 +90,19 @@ export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
     throw new ApiError(400, "Invalid verification token");
   }
 
-  const hashedToken = crypto
-    .createHash("sha256")
-    .update(token)
-    .digest("hex");
+  const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
 
-  const user = await User.findOne({ verificationToken: hashedToken });
+  const user = await User.findOne({
+    verificationToken: hashedToken,
+    verificationTokenExpires: { $gt: new Date() },
+  });
   if (!user) {
     throw new ApiError(400, "Invalid or expired verification token");
   }
 
   user.isVerified = true;
   user.verificationToken = undefined;
+  user.verificationTokenExpires = undefined;
   await user.save();
 
   res.json(
@@ -110,66 +113,69 @@ export const verifyEmail = asyncHandler(async (req: Request, res: Response) => {
   );
 });
 
-export const forgotPassword = asyncHandler(async (req: Request, res: Response) => {
-  const { email } = req.body;
+export const forgotPassword = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { email } = req.body;
 
-  const user = await User.findOne({ email });
+    const user = await User.findOne({ email });
 
-  if (user) {
-    const resetToken = crypto.randomBytes(32).toString("hex");
+    if (user) {
+      const resetToken = crypto.randomBytes(32).toString("hex");
 
-    user.resetPasswordToken = crypto
-      .createHash("sha256")
-      .update(resetToken)
-      .digest("hex");
+      user.resetPasswordToken = crypto
+        .createHash("sha256")
+        .update(resetToken)
+        .digest("hex");
 
-    user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour expiry
+      user.resetPasswordExpires = new Date(Date.now() + 3600000); // 1 hour expiry
+      await user.save();
+
+      await emailService.sendPasswordResetEmail(email, resetToken);
+    }
+
+    res.json(
+      new ApiResponse({
+        statusCode: 200,
+        message:
+          "If that email address is in our system, we have sent a password reset link.",
+      }),
+    );
+  },
+);
+
+export const resetPassword = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { token } = req.params;
+    const { password } = req.body;
+    if (typeof token !== "string") {
+      throw new ApiError(400, "Invalid or expired password reset token");
+    }
+
+    const hashedToken = crypto.createHash("sha256").update(token).digest("hex");
+
+    const user = await User.findOne({
+      resetPasswordToken: hashedToken,
+      resetPasswordExpires: { $gt: new Date() },
+    });
+
+    if (!user) {
+      throw new ApiError(400, "Invalid or expired password reset token");
+    }
+
+    user.passwordHash = await authService.hashPassword(password);
+    user.resetPasswordToken = undefined;
+    user.resetPasswordExpires = undefined;
     await user.save();
 
-    await emailService.sendPasswordResetEmail(email, resetToken);
-  }
-
-  res.json(
-    new ApiResponse({
-      statusCode: 200,
-      message: "If that email address is in our system, we have sent a password reset link.",
-    }),
-  );
-});
-
-export const resetPassword = asyncHandler(async (req: Request, res: Response) => {
-  const { token } = req.params;
-  const { password } = req.body;
-  if (typeof token !== "string") {
-    throw new ApiError(400, "Invalid or expired password reset token");
-  }
-
-  const hashedToken = crypto
-    .createHash("sha256")
-    .update(token)
-    .digest("hex");
-
-  const user = await User.findOne({
-    resetPasswordToken: hashedToken,
-    resetPasswordExpires: { $gt: new Date() },
-  });
-
-  if (!user) {
-    throw new ApiError(400, "Invalid or expired password reset token");
-  }
-
-  user.passwordHash = await authService.hashPassword(password);
-  user.resetPasswordToken = undefined;
-  user.resetPasswordExpires = undefined;
-  await user.save();
-
-  res.json(
-    new ApiResponse({
-      statusCode: 200,
-      message: "Password reset successful. You can now log in with your new password.",
-    }),
-  );
-});
+    res.json(
+      new ApiResponse({
+        statusCode: 200,
+        message:
+          "Password reset successful. You can now log in with your new password.",
+      }),
+    );
+  },
+);
 
 export const refresh = asyncHandler(async (req: Request, res: Response) => {
   const refreshToken = req.cookies?.refreshToken;
@@ -179,7 +185,9 @@ export const refresh = asyncHandler(async (req: Request, res: Response) => {
 
   let decoded: { id: string };
   try {
-    decoded = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET) as { id: string };
+    decoded = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET) as {
+      id: string;
+    };
   } catch (error) {
     throw new ApiError(401, "Invalid or expired refresh token");
   }
