@@ -10,7 +10,11 @@ export class ApiResponse {
   message: string;
   success: boolean;
 
-  constructor({ statusCode, message = "Success", data = null }: ApiResponseOptions) {
+  constructor({
+    statusCode,
+    message = "Success",
+    data = null,
+  }: ApiResponseOptions) {
     this.statusCode = statusCode;
     this.data = data;
     this.message = message;

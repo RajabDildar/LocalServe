@@ -1,4 +1,4 @@
-import { Schema, model, Document } from 'mongoose';
+import { Schema, model, Document } from "mongoose";
 
 export interface ICategory extends Document {
   name: string;
@@ -8,14 +8,17 @@ export interface ICategory extends Document {
   isActive: boolean;
 }
 
-const categorySchema = new Schema<ICategory>({
-  name: { type: String, required: true, unique: true },
-  slug: { type: String, required: true, unique: true },
-  icon: { type: String },
-  subcategories: [{ type: String }],
-  isActive: { type: Boolean, default: true },
-}, { timestamps: true });
+const categorySchema = new Schema<ICategory>(
+  {
+    name: { type: String, required: true, unique: true },
+    slug: { type: String, required: true, unique: true },
+    icon: { type: String },
+    subcategories: [{ type: String }],
+    isActive: { type: Boolean, default: true },
+  },
+  { timestamps: true },
+);
 
-const Category = model<ICategory>('Category', categorySchema);
+const Category = model<ICategory>("Category", categorySchema);
 
 export default Category;

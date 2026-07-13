@@ -1,17 +1,17 @@
-import jwt from 'jsonwebtoken';
-import bcrypt from 'bcrypt';
-import { env } from '../config/env';
-import { IUser } from '../models/User';
+import jwt from "jsonwebtoken";
+import bcrypt from "bcryptjs";
+import { env } from "../config/env";
+import { IUser } from "../models/User";
 
 export const generateAccessToken = (user: IUser) => {
   return jwt.sign({ id: user._id, role: user.role }, env.JWT_SECRET, {
-    expiresIn: env.JWT_ACCESS_EXPIRY,
+    expiresIn: env.JWT_ACCESS_EXPIRY as any,
   });
 };
 
 export const generateRefreshToken = (user: IUser) => {
   return jwt.sign({ id: user._id }, env.JWT_REFRESH_SECRET, {
-    expiresIn: env.JWT_REFRESH_EXPIRY,
+    expiresIn: env.JWT_REFRESH_EXPIRY as any,
   });
 };
 
