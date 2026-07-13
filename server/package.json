@@ -13,7 +13,6 @@
   "author": "Rajab Ali",
   "license": "ISC",
   "dependencies": {
-    "@types/helmet": "^0.0.48",
     "bcryptjs": "^3.0.3",
     "cloudinary": "^2.10.0",
     "cookie-parser": "^1.4.7",
@@ -32,6 +31,7 @@
     "zod": "^4.4.3"
   },
   "devDependencies": {
+    "@types/helmet": "^0.0.48",
     "@types/bcryptjs": "^2.4.6",
     "@types/cookie-parser": "^1.4.10",
     "@types/cors": "^2.8.19",
