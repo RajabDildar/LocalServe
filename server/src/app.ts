@@ -4,6 +4,9 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import { env } from "./config/env";
 import authRoutes from "./routes/auth.routes";
+import providerRoutes from "./routes/provider.routes";
+import serviceRoutes from "./routes/service.routes";
+import adminRoutes from "./routes/admin.routes";
 import { globalErrorHandler } from "./middleware/errorHandler";
 import { sanitizeBody } from "./middleware/sanitize";
 import { apiLimiter } from "./middleware/rateLimiter";
@@ -20,6 +23,9 @@ app.use("/api", apiLimiter);
 
 // Routes
 app.use("/api/auth", authRoutes);
+app.use("/api/providers", providerRoutes);
+app.use("/api/services", serviceRoutes);
+app.use("/api/admin", adminRoutes);
 
 app.get("/status", (req: Request, res: Response): void => {
   res.status(200).json({ success: true, message: "server is working fine!" });
