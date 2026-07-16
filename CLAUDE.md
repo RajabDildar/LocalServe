@@ -9,7 +9,7 @@ based on location. Full spec at `docs/spec.md`. Architecture at `docs/architectu
 
 <!-- UPDATE THIS EVERY TIME YOU COMPLETE A PHASE -->
 
-Phase 1: Foundation — Auth system + Mongoose models
+Phase 1: Core Provider Flow — Provider profile CRUD, Geospatial provider discovery endpoint, service listing, Admin: provider approval
 
 ## Monorepo Structure
 

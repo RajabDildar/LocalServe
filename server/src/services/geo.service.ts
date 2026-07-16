@@ -37,7 +37,17 @@ export const findNearbyProviders = async ({
 }) => {
   const radiusMeters = radiusKm * 1000;
 
-  const query: any = {
+  const query: {
+    location: {
+      $near: {
+        $geometry: { type: "Point"; coordinates: [number, number] };
+        $maxDistance: number;
+      };
+    };
+    isApproved: boolean;
+    isAvailable: boolean;
+    avgRating?: { $gte: number };
+  } = {
     location: {
       $near: {
         $geometry: { type: "Point", coordinates: [lng, lat] },
