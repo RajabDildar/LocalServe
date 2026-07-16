@@ -7,6 +7,12 @@ import { providerProfileSchema } from "../validators/provider.validator";
 const router = Router();
 
 router.get("/", providerController.getNearby);
+router.get(
+  "/profile",
+  protect,
+  requireRole("provider"),
+  providerController.getMyProfile,
+);
 router.get("/:id", providerController.getById);
 router.put(
   "/profile",

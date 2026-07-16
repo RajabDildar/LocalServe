@@ -1,4 +1,6 @@
 import ProviderProfile from "../models/ProviderProfile";
+import Service from "../models/Service";
+import { Types } from "mongoose";
 
 export const calculateDistance = (
   lat1: number,
@@ -7,7 +9,7 @@ export const calculateDistance = (
   lng2: number,
 ): number => {
   const toRad = (value: number) => (value * Math.PI) / 180;
-  const R = 6371; // Earth's radius in km
+  const R = 6371;
   const dLat = toRad(lat2 - lat1);
   const dLng = toRad(lng2 - lng1);
   const a =
@@ -21,7 +23,6 @@ export const findNearbyProviders = async ({
   lng,
   radiusKm,
   categoryId,
-  sort,
   minRating,
   page = 1,
   limit = 20,
@@ -30,48 +31,59 @@ export const findNearbyProviders = async ({
   lng: number;
   radiusKm: number;
   categoryId?: string;
-  sort?: string;
   minRating?: number;
   page?: number;
   limit?: number;
 }) => {
   const radiusMeters = radiusKm * 1000;
 
-  const query: {
-    location: {
-      $near: {
-        $geometry: { type: "Point"; coordinates: [number, number] };
-        $maxDistance: number;
-      };
-    };
-    isApproved: boolean;
-    isAvailable: boolean;
-    avgRating?: { $gte: number };
-  } = {
-    location: {
-      $near: {
-        $geometry: { type: "Point", coordinates: [lng, lat] },
-        $maxDistance: radiusMeters,
+  // ProviderProfile has no categoryId field — category lives on Service.
+  // So a category filter means "providers who have an active service in that category".
+  let providerIdFilter: Types.ObjectId[] | undefined;
+  if (categoryId) {
+    providerIdFilter = await Service.distinct("providerId", {
+      categoryId,
+      isActive: true,
+    });
+    if (providerIdFilter.length === 0) return [];
+  }
+
+  const providers = await ProviderProfile.aggregate([
+    {
+      $geoNear: {
+        near: { type: "Point", coordinates: [lng, lat] },
+        distanceField: "distanceMeters",
+        maxDistance: radiusMeters,
+        spherical: true,
+        query: {
+          isApproved: true,
+          isAvailable: true,
+          ...(minRating && { avgRating: { $gte: minRating } }),
+          ...(providerIdFilter && { _id: { $in: providerIdFilter } }),
+        },
       },
     },
-    isApproved: true,
-    isAvailable: true,
-  };
+    // A provider only counts if the customer is inside THAT provider's
+    // own serviceRadius, not just inside whatever radius the customer searched.
+    {
+      $match: {
+        $expr: {
+          $lte: ["$distanceMeters", { $multiply: ["$serviceRadius", 1000] }],
+        },
+      },
+    },
+    { $sort: { distanceMeters: 1 } },
+    { $skip: (page - 1) * limit },
+    { $limit: limit },
+  ]);
 
-  if (minRating) query.avgRating = { $gte: minRating };
-
-  const providers = await ProviderProfile.find(query)
-    .populate("userId", "name avatar")
-    .skip((page - 1) * limit)
-    .limit(limit);
+  await ProviderProfile.populate(providers, {
+    path: "userId",
+    select: "name avatar",
+  });
 
   return providers.map((p) => ({
-    ...p.toObject(),
-    distanceKm: calculateDistance(
-      lat,
-      lng,
-      p.location.coordinates[1],
-      p.location.coordinates[0],
-    ),
+    ...p,
+    distanceKm: p.distanceMeters / 1000,
   }));
 };

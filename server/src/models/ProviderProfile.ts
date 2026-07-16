@@ -9,6 +9,8 @@ export interface IProviderProfile extends Document {
   };
   serviceRadius: number; // in km
   isApproved: boolean;
+  isRejected: boolean;
+  rejectionReason?: string;
   isAvailable: boolean;
   avgRating: number;
   reviewCount: number;
@@ -31,6 +33,8 @@ const providerProfileSchema = new Schema<IProviderProfile>(
     },
     serviceRadius: { type: Number, required: true }, // in km
     isApproved: { type: Boolean, default: false },
+    isRejected: { type: Boolean, default: false },
+    rejectionReason: { type: String },
     isAvailable: { type: Boolean, default: true },
     avgRating: { type: Number, default: 0, min: 0, max: 5 },
     reviewCount: { type: Number, default: 0 },
