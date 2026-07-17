@@ -4,7 +4,6 @@ import ProviderProfile from "../models/ProviderProfile";
 import { Request, Response } from "express";
 import { ApiResponse } from "../utils/ApiResponse";
 
-// server/src/controllers/admin.controller.ts — replace the two exports
 export const getPendingProviders = asyncHandler(
   async (req: Request, res: Response) => {
     const providers = await ProviderProfile.find({

@@ -21,6 +21,12 @@ export const providerApi = {
   ): Promise<{ success: boolean; data: IProvider[] }> => {
     return api.get("/providers", { params });
   },
+  getMyProfile: async (): Promise<{
+    success: boolean;
+    data: IProvider | null;
+  }> => {
+    return api.get("/providers/profile");
+  },
   getById: async (
     id: string,
   ): Promise<{ success: boolean; data: IProvider }> => {

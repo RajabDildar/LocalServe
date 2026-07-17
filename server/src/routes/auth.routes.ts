@@ -6,19 +6,31 @@ import {
   loginSchema,
   forgotPasswordSchema,
   resetPasswordSchema,
+  resendVerificationSchema,
 } from "../validators/auth.validator";
 import { protect } from "../middleware/auth";
-import { authLimiter } from "../middleware/rateLimiter";
+import {
+  authLimiter,
+  resendVerificationLimiter,
+} from "../middleware/rateLimiter";
 
 const router = Router();
+
+router.get("/me", protect, authController.getMe);
+router.post("/refresh-token", authController.refresh);
 
 router.use(authLimiter);
 
 router.post("/register", validate(registerSchema), authController.register);
 router.post("/login", validate(loginSchema), authController.login);
-router.post("/refresh-token", authController.refresh);
 router.post("/logout", authController.logout);
-router.get("/verify-email/:token", authController.verifyEmail);
+router.post("/verify-email/:token", authController.verifyEmail);
+router.post(
+  "/resend-verification",
+  validate(resendVerificationSchema),
+  resendVerificationLimiter,
+  authController.resendVerification,
+);
 router.post(
   "/forgot-password",
   validate(forgotPasswordSchema),
@@ -29,6 +41,5 @@ router.post(
   validate(resetPasswordSchema),
   authController.resetPassword,
 );
-router.get("/me", protect, authController.getMe);
 
 export default router;

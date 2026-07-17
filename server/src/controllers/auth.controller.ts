@@ -222,3 +222,37 @@ export const logout = asyncHandler(async (req: Request, res: Response) => {
     }),
   );
 });
+
+export const resendVerification = asyncHandler(
+  async (req: Request, res: Response) => {
+    const { email } = req.body;
+
+    const user = await User.findOne({ email });
+
+    // Only generate & send a token if the user exists AND is not already verified
+    if (user && !user.isVerified) {
+      const verificationToken = crypto.randomBytes(32).toString("hex");
+
+      user.verificationToken = crypto
+        .createHash("sha256")
+        .update(verificationToken)
+        .digest("hex");
+
+      user.verificationTokenExpires = new Date(
+        Date.now() + 24 * 60 * 60 * 1000,
+      ); // 24h
+      await user.save();
+
+      await emailService.sendVerificationEmail(email, verificationToken);
+    }
+
+    // Always return a success status to prevent user enumeration
+    res.json(
+      new ApiResponse({
+        statusCode: 200,
+        message:
+          "If an unverified account is registered with this email, a new verification link has been sent.",
+      }),
+    );
+  },
+);
