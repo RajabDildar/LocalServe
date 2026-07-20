@@ -93,3 +93,79 @@ export const sendPasswordResetEmail = async (email: string, token: string) => {
     ),
   });
 };
+
+export const sendBookingRequestEmail = async (
+  email: string,
+  bookingId: string,
+) => {
+  const url = `${CLIENT_URL}/bookings/${bookingId}`;
+  await resend.emails.send({
+    from: FROM,
+    to: email,
+    subject: "New booking request",
+    html: getHtmlTemplate(
+      "New booking request",
+      "You have a new booking request.",
+      url,
+      "View Booking",
+      "You have received a new booking request. Click the button below to view and manage it.",
+    ),
+  });
+};
+
+export const sendBookingAcceptedEmail = async (
+  email: string,
+  bookingId: string,
+) => {
+  const url = `${CLIENT_URL}/bookings/${bookingId}`;
+  await resend.emails.send({
+    from: FROM,
+    to: email,
+    subject: "Booking accepted",
+    html: getHtmlTemplate(
+      "Booking accepted",
+      "Your booking request has been accepted.",
+      url,
+      "View Booking",
+      "Your booking request has been accepted. Click the button below to view details.",
+    ),
+  });
+};
+
+export const sendBookingRejectedEmail = async (
+  email: string,
+  bookingId: string,
+) => {
+  const url = `${CLIENT_URL}/bookings/${bookingId}`;
+  await resend.emails.send({
+    from: FROM,
+    to: email,
+    subject: "Booking rejected",
+    html: getHtmlTemplate(
+      "Booking rejected",
+      "Your booking request has been rejected.",
+      url,
+      "View Booking",
+      "Unfortunately, your booking request has been rejected.",
+    ),
+  });
+};
+
+export const sendBookingCancelledEmail = async (
+  email: string,
+  bookingId: string,
+) => {
+  const url = `${CLIENT_URL}/bookings/${bookingId}`;
+  await resend.emails.send({
+    from: FROM,
+    to: email,
+    subject: "Booking cancelled",
+    html: getHtmlTemplate(
+      "Booking cancelled",
+      "Your booking has been cancelled.",
+      url,
+      "View Booking",
+      "Your booking has been cancelled. Click the button below to view details.",
+    ),
+  });
+};

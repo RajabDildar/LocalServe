@@ -11,6 +11,7 @@ import { globalErrorHandler } from "./middleware/errorHandler";
 import { sanitizeBody } from "./middleware/sanitize";
 import { apiLimiter } from "./middleware/rateLimiter";
 import categoryRoutes from "./routes/category.routes";
+import bookingRoutes from "./routes/booking.routes";
 
 const app = express();
 
@@ -28,6 +29,7 @@ app.use("/api/providers", providerRoutes);
 app.use("/api/services", serviceRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/categories", categoryRoutes);
+app.use("/api/bookings", bookingRoutes);
 
 app.get("/status", (req: Request, res: Response): void => {
   res.status(200).json({ success: true, message: "server is working fine!" });
