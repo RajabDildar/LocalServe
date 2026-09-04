@@ -1,4 +1,7 @@
 import { createBrowserRouter, RouterProvider } from "react-router-dom";
+import { BookingPage } from "@/pages/customer/BookingPage";
+import { BookingsDashboard } from "@/pages/customer/BookingsDashboard";
+import { ProviderDashboard } from "@/pages/provider/ProviderDashboard";
 import { HomePage } from "@/pages/customer/HomePage";
 import { ProviderDetailPage } from "@/pages/customer/ProviderDetailPage";
 import { ProfileSetupPage } from "@/pages/provider/ProfileSetupPage";
@@ -20,6 +23,27 @@ const router = createBrowserRouter([
     children: [
       { path: "/", element: <HomePage /> },
       { path: "/provider/:id", element: <ProviderDetailPage /> },
+      { path: "/provider/:providerId/service/:serviceId/book", element: <BookingPage /> },
+      {
+        path: "/dashboard/bookings",
+        element: (
+          <ProtectedRoute>
+            <RoleRoute allowedRoles={["customer"]}>
+              <BookingsDashboard />
+            </RoleRoute>
+          </ProtectedRoute>
+        ),
+      },
+      {
+        path: "/dashboard/provider",
+        element: (
+          <ProtectedRoute>
+            <RoleRoute allowedRoles={["provider"]}>
+              <ProviderDashboard />
+            </RoleRoute>
+          </ProtectedRoute>
+        ),
+      },
       { path: "/login", element: <LoginPage /> },
       { path: "/register", element: <RegisterPage /> },
       { path: "/forgot-password", element: <ForgotPasswordPage /> },

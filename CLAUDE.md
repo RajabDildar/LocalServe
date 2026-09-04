@@ -1,4 +1,4 @@
-# LocalServe — Project Context for Antigravity Cli
+# LocalServe — Project Context for CLAUDE
 
 ## What This Project Is
 

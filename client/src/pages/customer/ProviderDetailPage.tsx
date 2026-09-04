@@ -1,9 +1,10 @@
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { useQuery } from "@tanstack/react-query";
 import { providerApi } from "@/services/provider.api";
 import { useServices } from "@/hooks/useServices";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { type IService } from "@/types/service.types";
 import PageLoader from "@/components/common/PageLoader";
 
@@ -64,9 +65,14 @@ export const ProviderDetailPage = () => {
               </div>
             </CardHeader>
             <CardContent>
-              <p className="text-sm text-muted-foreground">
+              <p className="text-sm text-muted-foreground mb-4">
                 {service.description}
               </p>
+              <Button asChild>
+                <Link to={`/provider/${provider._id}/service/${service._id}/book`}>
+                  Book This Service
+                </Link>
+              </Button>
             </CardContent>
           </Card>
         ))}
