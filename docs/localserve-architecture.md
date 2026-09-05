@@ -1,1201 +1,447 @@
-# LocalServe — Architecture & Tech Stack Document
-**Version:** 1.0  
-**Status:** Draft  
-**Last Updated:** June 2026  
-**Companion to:** localserve-spec.md v1.0
+# LocalServe — Software Architecture
+
+**Version:** 2.0
+**Status:** Approved source of truth
+**Last updated:** 5 September 2026
+**Companion document:** `docs/localserve-spec.md` v2.0
 
 ---
 
-## 1. Tech Stack Summary
+## 1. Authority and Scope
 
-| Layer | Technology | Reason |
+This document defines **how LocalServe must be built**. The product specification defines what it must do. Together they are the implementation source of truth. A change that alters a requirement, domain invariant, API contract, security boundary, or deployment assumption must update the relevant document before implementation.
+
+LocalServe is a portfolio demonstration, not a production business. The architecture deliberately demonstrates sound marketplace engineering while avoiding operational infrastructure that adds little portfolio value.
+
+## 2. Architectural Decisions
+
+| ID | Decision | Rationale |
 |---|---|---|
-| Frontend Framework | React 18 + Vite | Fast dev server, HMR, smaller bundles than CRA |
-| Language | TypeScript (full stack) | Type safety, better Claude Code output, catches bugs early |
-| Styling | Tailwind CSS v3 | Utility-first, no context switching, great with shadcn |
-| UI Components | shadcn/ui | Accessible, unstyled base, fully customizable |
-| Client State | Zustand | Minimal boilerplate for auth + location state |
-| Server State | TanStack Query (React Query) | Caching, background refetch, loading/error states |
-| Forms | React Hook Form + Zod | Performance, schema-first validation |
-| HTTP Client | Axios | Interceptors for JWT injection and error handling |
-| Backend Framework | Node.js + Express | Mature, fast, MERN standard |
-| Database | MongoDB Atlas + Mongoose | Geospatial support, flexible schema, MERN standard |
-| Auth | JWT (access + refresh tokens) | Stateless, scalable |
-| Payments | Stripe + Stripe Connect | Industry standard, escrow model, provider payouts |
-| File Storage | Cloudinary | Free tier, built-in transformations, CDN |
-| Email | Resend | Modern API, generous free tier, great DX |
-| Real-time | Socket.io | WebSocket abstraction (v2 — planned, not MVP) |
-| Deployment: Frontend | Vercel | Free tier, zero-config, auto-deploy from GitHub |
-| Deployment: Backend | Render | Free tier, Docker support, easy env management |
-| Deployment: DB | MongoDB Atlas | Official cloud MongoDB, free M0 tier |
+| ADR-01 | Use a TypeScript modular monolith: React client, Express API, MongoDB. | Fits the existing repository and keeps domain boundaries visible without microservice overhead. |
+| ADR-02 | One account is always customer-capable; an approved provider profile adds provider capability. | Matches the agreed dual-role model and avoids duplicate identities. |
+| ADR-03 | Use fixed-price, duration-based services only. | Makes totals and availability deterministic. |
+| ADR-04 | Use request-based scheduling with a database-enforced reservation lock. | Providers control acceptance while concurrent requests cannot double-book a confirmed slot. |
+| ADR-05 | Keep booking, payment, transfer, and dispute states separate. | Prevents one overloaded status field and makes recovery explicit. |
+| ADR-06 | Use Stripe Connect Express in test mode with separate charges and transfers. | Demonstrates marketplace payment orchestration and delayed transfer without claiming escrow. |
+| ADR-07 | Use a transactional outbox and a leased MongoDB worker; do not add Redis. | Provides reliable asynchronous processing with the existing stack. |
+| ADR-08 | Expose a same-origin versioned API at `/api/v1`. | Avoids third-party-cookie fragility and permits future contract evolution. |
+| ADR-09 | Store money as integer USD cents and commission as basis points. | Avoids floating-point money errors. |
+| ADR-10 | Expose approximate locations publicly and exact service addresses only after payment. | Applies least-privilege privacy to marketplace discovery. |
+| ADR-11 | Use Mapbox behind a server-side geocoding adapter. | Provides manual place search without exposing a privileged token or coupling domain logic to a vendor. |
+| ADR-12 | Deploy the client on Vercel and API/worker on Render free services for demonstration only. | Matches the portfolio constraint; cold starts and no SLA are accepted. |
+| ADR-13 | Use a 3-hour minimum lead, 90-day booking horizon, 24-hour response cap, provider-local weekly availability with date overrides, and no self-booking. | Makes every scheduling decision deterministic while preserving the dual-capability account model. |
+| ADR-14 | Permit customer disputes for 24 hours after completion. | Makes the documented refund-after-transfer and proportional reversal path reachable in the portfolio demonstration. |
 
----
+## 3. Technology Baseline
 
-## 2. System Architecture Overview
+The implementation must remain on compatible releases of the currently selected major versions unless an ADR changes them.
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                     CLIENT LAYER                        │
-│   React + Vite + TypeScript + TailwindCSS + shadcn/ui   │
-│   Hosted on Vercel                                      │
-└────────────────────────┬────────────────────────────────┘
-                         │ HTTPS REST API calls
-                         │ (Axios + TanStack Query)
-┌────────────────────────▼────────────────────────────────┐
-│                    API LAYER                            │
-│   Node.js + Express + TypeScript                        │
-│   Hosted on Render                                      │
-│                                                         │
-│   Middleware chain:                                     │
-│   Request → Helmet → CORS → Rate Limiter →              │
-│   Auth (JWT) → Validator → Controller → Response        │
-└───┬───────────────┬───────────────┬─────────────────────┘
-    │               │               │
-    ▼               ▼               ▼
-┌───────────┐  ┌─────────┐  ┌──────────────┐
-│  MongoDB  │  │Cloudinary│  │   Stripe     │
-│  Atlas    │  │(Files)   │  │  + Connect   │
-│(Geospatial│  └─────────┘  └──────────────┘
-│ Indexes)  │
-└───────────┘
-    +
-┌───────────┐
-│  Resend   │
-│  (Email)  │
-└───────────┘
+| Layer | Baseline |
+|---|---|
+| Runtime | Node.js 22.12+; TypeScript 6 |
+| Client | React 19, Vite 8, React Router 7, TanStack Query 5, Zustand 5, React Hook Form 7, Zod 4, Tailwind CSS 4, Axios 1 |
+| API | Express 5, Mongoose 9, Zod 4 |
+| Integrations | Stripe Node 22, Resend 6, Mapbox HTTP APIs |
+| Data | MongoDB Atlas replica set |
+| Quality | ESLint, Vitest, React Testing Library, Supertest, Playwright |
+
+The repository must commit lockfiles. Dependency upgrades must pass builds, lint, unit, integration, and end-to-end tests.
+
+## 4. System Context and Containers
+
+```mermaid
+flowchart TD
+    Browser["React browser client"] -->|same-origin /api/v1| Vercel["Vercel edge and rewrites"]
+    Vercel --> API["Express API on Render"]
+    API --> Mongo[("MongoDB Atlas")]
+    API --> Stripe["Stripe test mode"]
+    API --> Mapbox["Mapbox geocoding"]
+    Worker["Mongo-leased worker"] --> Mongo
+    Worker --> Stripe
+    Worker --> Resend["Resend email"]
+    Stripe -->|signed webhooks| API
 ```
 
-### Request Flow (example: customer searches for providers)
+| Container | Responsibility |
+|---|---|
+| React client | Routing, accessible UI, form validation, server-state caching, session-aware presentation. It never decides authorization, price, eligibility, or state transitions. |
+| Express API | Authentication, authorization, validation, domain commands, queries, Stripe webhooks, serialization, and transactional writes. |
+| Worker | Claims outbox jobs with leases; sends email; expires requests; auto-completes bookings; reconciles payments; creates eligible transfers. |
+| MongoDB | System of record, geospatial queries, unique constraints, transactions, outbox, audit events, and scheduling locks. |
+| External adapters | Stripe test payments, Mapbox geocoding, and Resend email. Domain services depend on local interfaces, not vendor SDK types. |
 
-```
-1. Customer opens app → browser prompts for location
-2. Zustand stores { lat, lng } in client state
-3. React Query calls GET /api/providers?lat=...&lng=...&radius=10&category=plumbing
-4. Express route hits providerController.getNearby()
-5. Controller calls MongoDB $near geospatial query with 2dsphere index
-6. Results sorted by distance, filtered by isApproved + isAvailable
-7. JSON response → React Query caches it
-8. Provider cards rendered with distance badges
-```
+## 5. Repository and Module Boundaries
 
----
+The existing `client/` and `server/` split is retained. New server code should be organized by domain rather than by generic technical folders.
 
-## 3. Project Structure
+```text
+client/src/
+  app/                 composition, router, providers
+  features/            auth, discovery, provider, booking, payment, admin
+  shared/              UI primitives, API client, schemas, utilities
 
-### 3.1 Monorepo Layout
-
-```
-localserve/
-├── client/                  # React frontend
-├── server/                  # Express backend
-├── .gitignore
-└── README.md
-```
-
-### 3.2 Backend Structure (`server/`)
-
-```
-server/
-├── src/
-│   ├── config/
-│   │   ├── db.ts            # MongoDB connection
-│   │   ├── stripe.ts        # Stripe SDK init
-│   │   ├── cloudinary.ts    # Cloudinary config
-│   │   └── env.ts           # Validated env vars (zod)
-│   │
-│   ├── middleware/
-│   │   ├── auth.ts          # JWT verification, role guard
-│   │   ├── validate.ts      # Zod schema validation wrapper
-│   │   ├── upload.ts        # Multer + Cloudinary upload handler
-│   │   ├── rateLimiter.ts   # Per-route rate limits
-│   │   └── errorHandler.ts  # Global error handler
-│   │
-│   ├── models/
-│   │   ├── User.ts
-│   │   ├── ProviderProfile.ts
-│   │   ├── Service.ts
-│   │   ├── Booking.ts
-│   │   ├── Review.ts
-│   │   ├── Notification.ts
-│   │   ├── Dispute.ts
-│   │   └── Category.ts
-│   │
-│   ├── routes/
-│   │   ├── auth.routes.ts
-│   │   ├── provider.routes.ts
-│   │   ├── service.routes.ts
-│   │   ├── booking.routes.ts
-│   │   ├── payment.routes.ts
-│   │   ├── review.routes.ts
-│   │   ├── notification.routes.ts
-│   │   ├── dispute.routes.ts
-│   │   └── admin.routes.ts
-│   │
-│   ├── controllers/
-│   │   ├── auth.controller.ts
-│   │   ├── provider.controller.ts
-│   │   ├── service.controller.ts
-│   │   ├── booking.controller.ts
-│   │   ├── payment.controller.ts
-│   │   ├── review.controller.ts
-│   │   ├── notification.controller.ts
-│   │   ├── dispute.controller.ts
-│   │   └── admin.controller.ts
-│   │
-│   ├── services/            # Business logic, NOT Express-specific
-│   │   ├── auth.service.ts       # Token generation, hashing
-│   │   ├── email.service.ts      # Resend email templates
-│   │   ├── payment.service.ts    # Stripe operations
-│   │   ├── geo.service.ts        # Distance calc, geo queries
-│   │   └── notification.service.ts
-│   │
-│   ├── validators/          # Zod schemas for request validation
-│   │   ├── auth.validator.ts
-│   │   ├── booking.validator.ts
-│   │   ├── provider.validator.ts
-│   │   └── review.validator.ts
-│   │
-│   ├── utils/
-│   │   ├── ApiError.ts      # Custom error class
-│   │   ├── ApiResponse.ts   # Standard response wrapper
-│   │   ├── asyncHandler.ts  # try/catch wrapper for controllers
-│   │   └── constants.ts     # Booking statuses, roles, etc.
-│   │
-│   ├── types/
-│   │   └── express.d.ts     # Extends req.user type
-│   │
-│   └── app.ts               # Express app setup
-│   └── server.ts            # HTTP server entry point
-│
-├── .env
-├── .env.example
-├── tsconfig.json
-└── package.json
+server/src/
+  app/                 Express composition and middleware
+  modules/             auth, users, providers, services, discovery,
+                       bookings, payments, disputes, reviews, admin
+  infrastructure/      database, stripe, geocoding, email, outbox, logging
+  shared/              errors, security, validation, types
+  worker/              schedulers and outbox consumers
 ```
 
-### 3.3 Frontend Structure (`client/`)
+Each server module owns its routes, application services, domain rules, repository interfaces, schemas, and serializers. Routes must be thin. Mongoose documents and secrets must never be returned directly to the client. Cross-module writes go through application services and MongoDB transactions.
 
-```
-client/
-├── src/
-│   ├── components/           # Shared, reusable UI
-│   │   ├── ui/               # shadcn/ui generated components
-│   │   ├── layout/           # Navbar, Footer, Sidebar
-│   │   ├── common/           # StarRating, ProviderCard, BookingCard, etc.
-│   │   └── forms/            # Reusable form components
-│   │
-│   ├── pages/                # Route-level components
-│   │   ├── auth/
-│   │   │   ├── LoginPage.tsx
-│   │   │   ├── RegisterPage.tsx
-│   │   │   └── ForgotPasswordPage.tsx
-│   │   ├── customer/
-│   │   │   ├── HomePage.tsx           # Provider discovery
-│   │   │   ├── ProviderDetailPage.tsx
-│   │   │   ├── BookingPage.tsx        # Booking request form
-│   │   │   ├── BookingsDashboard.tsx  # Customer's bookings
-│   │   │   └── PaymentPage.tsx        # Stripe Elements checkout
-│   │   ├── provider/
-│   │   │   ├── ProviderDashboard.tsx  # Incoming bookings
-│   │   │   ├── ProfileSetupPage.tsx
-│   │   │   ├── ServicesPage.tsx
-│   │   │   └── EarningsPage.tsx
-│   │   └── admin/
-│   │       ├── AdminDashboard.tsx
-│   │       ├── UsersPage.tsx
-│   │       ├── PendingProvidersPage.tsx
-│   │       ├── BookingsPage.tsx
-│   │       └── DisputesPage.tsx
-│   │
-│   ├── features/             # Feature-specific logic (co-located)
-│   │   ├── auth/
-│   │   │   ├── authStore.ts         # Zustand store
-│   │   │   └── useAuth.ts           # Hook wrapper
-│   │   ├── location/
-│   │   │   ├── locationStore.ts     # { lat, lng, address }
-│   │   │   └── useLocation.ts
-│   │   └── notifications/
-│   │       └── notificationStore.ts
-│   │
-│   ├── hooks/                # Custom hooks
-│   │   ├── useProviders.ts   # TanStack Query: fetch nearby providers
-│   │   ├── useBooking.ts
-│   │   ├── usePayment.ts
-│   │   └── useGeolocation.ts # Browser geolocation abstraction
-│   │
-│   ├── services/             # Axios API call functions
-│   │   ├── api.ts            # Axios instance with interceptors
-│   │   ├── auth.api.ts
-│   │   ├── provider.api.ts
-│   │   ├── booking.api.ts
-│   │   ├── payment.api.ts
-│   │   └── review.api.ts
-│   │
-│   ├── utils/
-│   │   ├── distance.ts       # km formatting helpers
-│   │   ├── currency.ts       # price formatting
-│   │   └── date.ts           # date formatting helpers
-│   │
-│   ├── types/
-│   │   ├── user.types.ts
-│   │   ├── booking.types.ts
-│   │   ├── provider.types.ts
-│   │   └── api.types.ts
-│   │
-│   ├── router/
-│   │   ├── index.tsx          # React Router v6 routes
-│   │   ├── ProtectedRoute.tsx # Auth guard
-│   │   └── RoleRoute.tsx      # Role guard (customer/provider/admin)
-│   │
-│   ├── App.tsx
-│   └── main.tsx
-│
-├── index.html
-├── vite.config.ts
-├── tailwind.config.ts
-├── tsconfig.json
-└── package.json
+## 6. Domain Data Model
+
+All records use UTC timestamps, MongoDB ObjectIds internally, `createdAt`, and `updatedAt`. API IDs are strings. Soft-deletable public resources have `deletedAt`; financial and audit records are never hard-deleted.
+
+### 6.1 Core collections
+
+| Collection | Required fields and constraints |
+|---|---|
+| `users` | normalized unique email, password hash, email-verification state, `isAdmin`, status `active | suspended`, public name, optional phone; no role enum for customer/provider capability. |
+| `refresh_sessions` | user, SHA-256 token hash, token family, expiry, last-used time, revoked time, replacement link, client metadata. TTL index on expiry. |
+| `provider_profiles` | unique user, approval state/reason/timestamps, bio, public general-area label, exact GeoJSON service origin, radius, `acceptingNewBookings`, IANA time zone, weekly availability, date overrides, rating aggregate, Connect account state. `2dsphere` index on origin. |
+| `categories` | unique slug, display name, sort order, active flag. |
+| `subcategories` | parent category, unique slug within parent, display name, sort order, active flag. A service subcategory must belong to its category. |
+| `services` | provider profile, title, description, category and subcategory references, price cents, currency `usd`, duration minutes, active flag. Price positive; duration 30–480 in 15-minute increments. |
+| `bookings` | parties, service reference, immutable service/provider/customer/location snapshots, requested interval, booking state, response/payment/confirmation/completion deadlines, payment/transfer/dispute summaries, optimistic version. |
+| `schedule_locks` | participant user ID, UTC 15-minute bucket, booking reference, and informational booking role (`provider` or `customer`). A unique compound index on participant user ID and bucket is the final overlap guard; role is deliberately excluded so one dual-capability account cannot provide and receive overlapping services. |
+| `payments` | unique booking, Stripe PaymentIntent/charge IDs, amount/currency, status, idempotency keys, last error. |
+| `transfers` | booking/payment, Stripe transfer ID, gross, commission, provider amount, released amount, reversed amount, status, release eligibility and timestamps. |
+| `refunds` | booking/payment, Stripe refund ID, amount, reason, status, transfer-reversal state. |
+| `disputes` | booking, opener, reason, evidence text, state, source booking state, admin resolution, refund/reversal references, timestamps. A partial unique index permits at most one `open` or `under_review` dispute per booking. |
+| `reviews` | unique booking and reviewer, provider, rating 1–5, required text, provider response, moderation state. Only completed paid bookings with no active dispute qualify. |
+| `webhook_events` | unique Stripe event ID, type, payload metadata, received/processed/error timestamps. |
+| `outbox_events` | aggregate, event type/version, payload, availability, lease owner/expiry, attempts, completion, last error. |
+| `audit_events` | actor, action, target, safe before/after summary, request/correlation ID, timestamp. Append-only. |
+
+### 6.2 Snapshot rule
+
+A booking must retain immutable snapshots of service title, price, currency, duration, commission rate, calculated fee/provider amounts, provider display identity, customer display identity, exact service address, coordinates, and agreed start/end. Later profile, availability, or service edits must not alter an existing booking.
+
+Personally identifying fields must be excluded from ordinary logs and audit diffs. Passwords, raw refresh tokens, Stripe secrets, webhook secrets, and full webhook payloads must never be logged.
+
+Weekly availability is embedded in the provider profile because it is small and updated as one aggregate. Date overrides are limited to dates inside the 90-day booking horizon; expired overrides may be pruned. Category and subcategory references remain on services and are snapshotted onto bookings; provider profiles do not duplicate category membership.
+
+## 7. State Machines and Concurrency
+
+### 7.1 Booking state
+
+```mermaid
+stateDiagram-v2
+    [*] --> requested
+    requested --> awaiting_payment: provider accepts
+    requested --> rejected: provider rejects
+    requested --> expired: response deadline
+    requested --> cancelled: customer cancels
+    awaiting_payment --> scheduled: payment succeeds
+    awaiting_payment --> expired: payment deadline
+    awaiting_payment --> cancelled: customer/provider cancels
+    scheduled --> in_progress: provider starts
+    scheduled --> cancelled: allowed customer/provider/admin cancellation
+    in_progress --> awaiting_confirmation: provider finishes
+    in_progress --> cancelled: provider/admin cancels
+    awaiting_confirmation --> completed: customer confirms or 72h elapses
+    awaiting_confirmation --> cancelled: admin force-cancels
 ```
 
----
+Terminal booking states are `completed`, `rejected`, `cancelled`, and `expired`. A dispute is an orthogonal record and flag, not a booking status. It can be opened for a `scheduled` provider no-show when `now >= scheduledStart + 30 minutes`, from `in_progress` or `awaiting_confirmation`, or after completion while `now < completedAt + 24 hours`. An active dispute freezes auto-completion and unreleased transfers. A post-completion dispute never reopens the booking lifecycle.
 
-## 4. Database Architecture
+An administrator may force-cancel a nonterminal booking for a documented moderation or support reason only when no dispute is active. The transaction changes the booking to `cancelled`, releases its schedule locks, records the audit/outbox events, and queues one idempotent full refund if payment succeeded. An active dispute must be concluded through the dispute-resolution command.
 
-### 4.1 MongoDB Schema Decisions
+Every transition must:
 
-- Store provider location as **GeoJSON Point** (`{ type: 'Point', coordinates: [lng, lat] }`). Note: MongoDB uses `[longitude, latitude]` order.
-- Add `2dsphere` index on `ProviderProfile.location` for all geospatial queries.
-- Booking stores `totalAmount`, `platformFee`, and `providerAmount` separately so they are never recalculated after the fact.
-- Booking status is an **enum enforced at the schema level**. No free-text status strings.
-- Reviews are tied to a `bookingId` and only one review per booking is allowed (unique index).
+1. check actor permission and current version/state;
+2. validate time and payment prerequisites;
+3. write state, deadlines, audit event, and outbox event in one transaction;
+4. return the canonical serialized booking.
 
-### 4.2 Mongoose Schemas
+Illegal or stale transitions return `409 CONFLICT`.
 
-#### User
-```typescript
-const userSchema = new Schema({
-  name:                  { type: String, required: true, trim: true },
-  email:                 { type: String, required: true, unique: true, lowercase: true },
-  passwordHash:          { type: String, required: true },
-  role:                  { type: String, enum: ['customer', 'provider', 'admin'], required: true },
-  phone:                 { type: String },
-  avatar:                { type: String },           // Cloudinary URL
-  isVerified:            { type: Boolean, default: false },
-  isActive:              { type: Boolean, default: true },
-  verificationToken:     { type: String },
-  resetPasswordToken:    { type: String },
-  resetPasswordExpires:  { type: Date },
-}, { timestamps: true });
+### 7.2 Time policy and provider availability
 
-// Indexes
-userSchema.index({ email: 1 });
-```
+The scheduling constants are normative, not environment-tunable: minimum lead `180` minutes, maximum horizon `90` days, response cap `24` hours, payment cutoff `120` minutes before start, provider start window `[scheduledStart - 30 minutes, scheduledStart + 30 minutes)`, confirmation period `72` hours, no-show grace `30` minutes, and post-completion dispute window `24` hours. Starting is forbidden at the upper start-window boundary, exactly when no-show eligibility begins.
 
-#### ProviderProfile
-```typescript
-const providerProfileSchema = new Schema({
-  userId:          { type: Schema.Types.ObjectId, ref: 'User', required: true, unique: true },
-  bio:             { type: String, maxlength: 1000 },
-  location: {
-    type:          { type: String, enum: ['Point'], required: true },
-    coordinates:   { type: [Number], required: true },  // [lng, lat]
-  },
-  serviceRadius:   { type: Number, required: true },     // in km
-  isApproved:      { type: Boolean, default: false },
-  isAvailable:     { type: Boolean, default: true },
-  avgRating:       { type: Number, default: 0, min: 0, max: 5 },
-  reviewCount:     { type: Number, default: 0 },
-  stripeAccountId: { type: String },                     // Stripe Connect account ID
-  portfolioImages: [{ type: String }],                   // Cloudinary URLs
-}, { timestamps: true });
+Weekly availability is stored as local wall-clock `[start, end)` windows for weekdays `0–6` in the provider's valid IANA time zone. Boundaries use 15-minute increments, windows do not overlap, and an overnight window is split at midnight. A date override for `YYYY-MM-DD` in the provider's time zone replaces, rather than merges with, that date's weekly windows; it is either closed or contains custom validated windows. UTC booking instants are converted into the provider's time zone for containment, so daylight-saving changes are handled by a time-zone-aware library rather than fixed offsets. The entire booking interval must fit inside one effective window.
 
-// CRITICAL: 2dsphere index enables $near and $geoWithin queries
-providerProfileSchema.index({ location: '2dsphere' });
-providerProfileSchema.index({ isApproved: 1, isAvailable: 1 });
-```
+At request creation, the start must be on a 15-minute UTC boundary and satisfy `now + 180 minutes <= start <= now + 90 days`. The server stores `responseDeadline = min(createdAt + 24 hours, start - 120 minutes)`. At acceptance it revalidates the service, profile approval, account status, `acceptingNewBookings`, effective availability, self-booking prohibition, start/end, response deadline, and the provider's Stripe test-payout readiness. Availability edits never invalidate an already accepted booking. All deadlines use the same rule: the guarded command is valid only while `now < deadline`, and the deadline has elapsed when `now >= deadline`. Expected-state transactional writes resolve races between a command and its deadline worker.
 
-#### Service
-```typescript
-const serviceSchema = new Schema({
-  providerId:    { type: Schema.Types.ObjectId, ref: 'ProviderProfile', required: true },
-  title:         { type: String, required: true },
-  description:   { type: String, required: true },
-  categoryId:    { type: Schema.Types.ObjectId, ref: 'Category', required: true },
-  subcategory:   { type: String },
-  pricingType:   { type: String, enum: ['fixed', 'hourly', 'custom'], required: true },
-  price:         { type: Number },                   // null if pricingType is 'custom'
-  images:        [{ type: String }],
-  isActive:      { type: Boolean, default: true },
-}, { timestamps: true });
+### 7.3 Overlap prevention
 
-serviceSchema.index({ providerId: 1, categoryId: 1 });
-```
+Discovery availability is advisory. Acceptance is authoritative:
 
-#### Booking
-```typescript
-const BOOKING_STATUSES = [
-  'pending',       // customer sent request, awaiting provider
-  'accepted',      // provider accepted, awaiting payment
-  'paid',          // customer paid, escrow holding funds
-  'rejected',      // provider rejected
-  'cancelled',     // cancelled before payment
-  'in_progress',   // provider started work
-  'completed',     // provider marked done, awaiting customer confirm
-  'confirmed',     // customer confirmed, triggers payout
-  'disputed',      // customer raised dispute
-  'refunded',      // payment refunded
-];
+1. Calculate `[start, end)` from the immutable service-duration snapshot.
+2. Expand the half-open interval into UTC 15-minute buckets.
+3. In one MongoDB transaction, insert locks for every bucket under the provider account's user ID and the customer account's user ID, move the booking to `awaiting_payment`, and persist `paymentDeadline = min(acceptedAt + 24 hours, start - 120 minutes)`.
+4. A duplicate-key failure for either party aborts the transaction and returns `409 SLOT_UNAVAILABLE`.
+5. Delete locks when a booking becomes `rejected`, `cancelled`, `expired`, or `completed`. Booking snapshots and audit events provide history; lock records are not history.
 
-const bookingSchema = new Schema({
-  customerId:       { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  providerId:       { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  serviceId:        { type: Schema.Types.ObjectId, ref: 'Service', required: true },
-  status:           { type: String, enum: BOOKING_STATUSES, default: 'pending' },
-  scheduledAt:      { type: Date, required: true },
-  description:      { type: String },
-  serviceAddress:   { type: String },
-  totalAmount:      { type: Number },               // Set when provider accepts
-  platformFee:      { type: Number },               // e.g. 10% of totalAmount
-  providerAmount:   { type: Number },               // totalAmount - platformFee
-  paymentIntentId:  { type: String },               // Stripe PaymentIntent ID
-  autoReleaseAt:    { type: Date },                 // Auto-release date (confirmed + 4 days)
-  cancelReason:     { type: String },
-}, { timestamps: true });
+The unique user/bucket lock constraint, not an application-only overlap query, prevents concurrent double acceptance. Because the same key space is used for both roles, a dual-capability user cannot accept provider work that overlaps a booking they made as a customer, or vice versa. Worker operations and command endpoints must be idempotent.
 
-bookingSchema.index({ customerId: 1, status: 1 });
-bookingSchema.index({ providerId: 1, status: 1 });
-bookingSchema.index({ paymentIntentId: 1 });
-```
+### 7.4 Independent financial and dispute states
 
-#### Review
-```typescript
-const reviewSchema = new Schema({
-  bookingId:       { type: Schema.Types.ObjectId, ref: 'Booking', required: true, unique: true },
-  customerId:      { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  providerId:      { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  rating:          { type: Number, required: true, min: 1, max: 5 },
-  comment:         { type: String, maxlength: 1000 },
-  providerResponse:{ type: String, maxlength: 500 },
-}, { timestamps: true });
+Payment: `unpaid | processing | succeeded | failed | partially_refunded | refunded`.
 
-// One review per booking
-reviewSchema.index({ bookingId: 1 }, { unique: true });
-reviewSchema.index({ providerId: 1 });
-```
+Transfer: `not_eligible | pending_release | released | partially_reversed | reversed | failed`.
 
-#### Notification
-```typescript
-const notificationSchema = new Schema({
-  userId:          { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  type:            { type: String, required: true },  // e.g. 'booking_accepted', 'payment_received'
-  title:           { type: String, required: true },
-  message:         { type: String, required: true },
-  isRead:          { type: Boolean, default: false },
-  relatedEntityId: { type: Schema.Types.ObjectId },   // bookingId or disputeId
-  relatedModel:    { type: String },                  // 'Booking' or 'Dispute'
-}, { timestamps: true });
+Dispute: `open | under_review | resolved_customer | resolved_provider | withdrawn`.
 
-notificationSchema.index({ userId: 1, isRead: 1 });
-```
+The booking projection may copy these values for efficient reads, but the payment, transfer, refund, and dispute collections remain authoritative.
 
-#### Dispute
-```typescript
-const DISPUTE_STATUSES = ['open', 'under_review', 'resolved_refund', 'resolved_no_action'];
-const DISPUTE_REASONS = ['service_not_done', 'poor_quality', 'no_show', 'overcharged', 'other'];
+### 7.5 Dispute workflow
 
-const disputeSchema = new Schema({
-  bookingId:    { type: Schema.Types.ObjectId, ref: 'Booking', required: true, unique: true },
-  raisedBy:     { type: Schema.Types.ObjectId, ref: 'User', required: true },
-  reason:       { type: String, enum: DISPUTE_REASONS, required: true },
-  description:  { type: String, required: true },
-  status:       { type: String, enum: DISPUTE_STATUSES, default: 'open' },
-  adminNote:    { type: String },
-  refundAmount: { type: Number },
-  resolvedAt:   { type: Date },
-  resolvedBy:   { type: Schema.Types.ObjectId, ref: 'User' },
-}, { timestamps: true });
-```
+`open` and `under_review` are active states. The customer may withdraw only an `open` dispute; an administrator moves `open` to `under_review` and resolves from either active state. Withdrawal removes the freeze without changing booking state. If the original confirmation deadline has elapsed, the worker may auto-complete on its next pass.
 
-#### Category
-```typescript
-const categorySchema = new Schema({
-  name:          { type: String, required: true, unique: true },
-  slug:          { type: String, required: true, unique: true },
-  icon:          { type: String },
-  subcategories: [{ type: String }],
-  isActive:      { type: Boolean, default: true },
-}, { timestamps: true });
-```
+An administrator resolution records `resolvedBy`, `resolvedAt`, a required note, refund amount, whether the service was delivered, and resulting payment/transfer references. Customer resolution with a full refund and `serviceDelivered=false` changes a nonterminal booking to `cancelled`. Any partial-refund delivered-service resolution changes a nonterminal booking to `completed`; an already completed booking remains completed. Provider resolution uses no refund, changes a nonterminal booking to `completed`, and makes any remaining transfer eligible. State and financial writes plus audit/outbox events occur in one transaction before external Stripe work.
 
----
+## 8. HTTP API Contract
 
-## 5. API Design
+All endpoints are under `/api/v1`; JSON uses `camelCase`; dates are ISO 8601 UTC; money fields end in `Cents`. Collection reads use cursor pagination with a default page size of 20 and maximum of 50. Mutating commands accept an `Idempotency-Key` where retries could duplicate financial or state-changing effects.
 
-### 5.1 Standard Response Format
+### 8.1 Endpoint surface
 
-Every API response uses this shape:
+| Area | Endpoints |
+|---|---|
+| Auth | `POST /auth/register`, `/auth/login`, `/auth/refresh`, `/auth/logout`, `/auth/logout-all`, `/auth/verify-email`, `/auth/resend-verification`, `/auth/forgot-password`, `/auth/reset-password`; `GET /auth/me` |
+| Providers | `POST /provider-profile`, `/provider-profile/submit`; `GET/PATCH /provider-profile`; `GET /providers`, `/providers/:id` |
+| Services | `POST /services`; `GET /services/:id`; `PATCH /services/:id`; `DELETE /services/:id` (soft deactivation); `POST /services/:id/activate`; `GET /providers/:id/services` |
+| Taxonomy and location | `GET /categories`, `/categories/:id/subcategories`, `/locations/search?q=...` |
+| Discovery | `GET /discovery/providers?lat&lng&radiusKm&categoryId&subcategoryId&minPriceCents&maxPriceCents&minRating&sort&cursor&limit` |
+| Bookings | `POST /bookings`; `GET /bookings`, `/bookings/:id`; command endpoints below |
+| Payments | `POST /bookings/:id/payment-intent`; `GET /bookings/:id/payment`; `POST /stripe/connect/account-link`; `GET /stripe/connect/status` |
+| Disputes | `POST /bookings/:id/disputes`; `GET /bookings/:id/dispute`; `POST /bookings/:id/dispute/withdraw` |
+| Reviews | `POST /bookings/:id/review`; `GET /providers/:id/reviews`; `PUT /reviews/:id/response` |
+| Admin reads | `GET /admin/users`, `/admin/provider-profiles`, `/admin/services`, `/admin/bookings`, `/admin/payments`, `/admin/transfers`, `/admin/disputes`, `/admin/reviews`, `/admin/categories` |
+| Admin commands | User suspend/reactivate, profile approve/reject, service hide/restore, booking force-cancel, dispute review/resolve, review hide/restore, and category/subcategory create/update/activate/deactivate endpoints described below |
+| Platform | `POST /webhooks/stripe`; `GET /health/live`, `/health/ready` |
 
-```typescript
-// Success
-{
-  "success": true,
-  "data": { ... },
-  "message": "Providers fetched successfully"
-}
+Booking commands use `POST /bookings/:id/{accept|reject|cancel|start|finish|confirm}`. Admin commands use `POST /admin/users/:id/{suspend|reactivate}`, `/admin/provider-profiles/:id/{approve|reject}`, `/admin/services/:id/{hide|restore}`, `/admin/bookings/:id/force-cancel`, `/admin/disputes/:id/{review|resolve}`, and `/admin/reviews/:id/{hide|restore}`. Category and subcategory administration uses ordinary create and explicit update/activate/deactivate endpoints under `/admin/categories` and `/admin/subcategories`. Commands are explicit because they carry domain rules and audit semantics; generic status patching and unrestricted refund endpoints are forbidden.
 
-// Error
-{
-  "success": false,
-  "message": "Booking not found",
-  "errors": []   // validation errors array, if any
-}
-```
+Discovery `sort` is one of `distance`, `rating`, `price_asc`, or `newest`; the default is `distance`. Cursors encode the selected sort key plus a stable ID tie-breaker. Repeated `DELETE /services/:id` and other idempotent state-setting commands return the canonical current state rather than duplicating effects.
 
-### 5.2 API Routes Reference
+### 8.2 Response and error envelope
 
-#### Auth  `/ api/auth`
-```
-POST   /register                 Register (customer or provider)
-POST   /login                    Login, returns access + refresh token
-POST   /logout                   Invalidate refresh token
-POST   /refresh-token            Issue new access token
-GET    /verify-email/:token      Verify email address
-POST   /forgot-password          Send reset email
-POST   /reset-password/:token    Reset password
-GET    /me                       Get current user (protected)
-```
+Successful responses contain `{ "data": ... }`; list responses also contain `{ "page": { "nextCursor": ... } }`. Errors use:
 
-#### Providers  `/api/providers`
-```
-GET    /                         Discover providers (with geo + filters)
-GET    /:id                      Get provider public profile
-PUT    /profile                  Update own provider profile (provider only)
-PUT    /availability             Toggle availability on/off (provider only)
-POST   /stripe/onboard           Start Stripe Connect onboarding (provider only)
-GET    /stripe/status            Check Stripe Connect status (provider only)
-```
-
-**Discovery query parameters:**
-```
-GET /api/providers?lat=31.45&lng=73.13&radius=10&category=plumbing&sort=distance&minRating=4
-```
-
-| Param | Type | Description |
-|---|---|---|
-| lat | Number | Customer latitude (required) |
-| lng | Number | Customer longitude (required) |
-| radius | Number | Max distance in km (default: 10) |
-| category | String | Category slug filter |
-| sort | String | `distance` / `rating` / `price_low` / `newest` |
-| minRating | Number | Minimum provider rating |
-| maxPrice | Number | Max service price |
-| page | Number | Pagination |
-| limit | Number | Results per page (default: 20) |
-
-#### Services  `/api/services`
-```
-GET    /provider/:providerId     List all services of a provider
-POST   /                         Create a service (provider only)
-PUT    /:id                      Update a service (provider only)
-DELETE /:id                      Deactivate a service (provider only)
-```
-
-#### Bookings  `/api/bookings`
-```
-POST   /                         Customer creates a booking request
-GET    /                         List bookings (customer: own, provider: incoming)
-GET    /:id                      Get single booking (parties involved only)
-PUT    /:id/accept               Provider accepts (sets price, triggers payment)
-PUT    /:id/reject               Provider rejects (with reason)
-PUT    /:id/cancel               Cancel booking (customer or provider)
-PUT    /:id/start                Provider marks in-progress
-PUT    /:id/complete             Provider marks completed
-PUT    /:id/confirm              Customer confirms completion (triggers payout)
-```
-
-#### Payments  `/api/payments`
-```
-POST   /create-intent            Create Stripe PaymentIntent for a booking
-POST   /webhook                  Stripe webhook endpoint (raw body)
-GET    /history                  Customer: payment history
-GET    /earnings                 Provider: earnings history
-```
-
-#### Reviews  `/api/reviews`
-```
-POST   /                         Customer submits review (booking must be confirmed)
-GET    /provider/:providerId      Get all reviews for a provider (public)
-PUT    /:id/respond              Provider responds to their review
-```
-
-#### Notifications  `/api/notifications`
-```
-GET    /                         Get user's notifications (paginated)
-GET    /unread-count             Get unread count only
-PUT    /:id/read                 Mark one as read
-PUT    /read-all                 Mark all as read
-```
-
-#### Disputes  `/api/disputes`
-```
-POST   /                         Customer raises a dispute
-GET    /:id                      Get dispute details
-```
-
-#### Admin  `/api/admin`
-```
-GET    /users                    List all users (with filters)
-PUT    /users/:id/status         Activate / suspend / ban user
-GET    /providers/pending        List providers awaiting approval
-PUT    /providers/:id/approve    Approve a provider profile
-PUT    /providers/:id/reject     Reject a provider profile (with reason)
-GET    /bookings                 List all bookings (filterable)
-GET    /disputes                 List all disputes
-PUT    /disputes/:id/resolve     Admin resolves dispute (with optional refund)
-DELETE /reviews/:id              Admin removes abusive review
-GET    /categories               Manage service categories
-POST   /categories               Create category
-PUT    /categories/:id           Update category
-```
-
----
-
-## 6. Authentication Architecture
-
-### 6.1 Token Strategy
-
-Two tokens are issued on login:
-
-| Token | Expiry | Storage | Purpose |
-|---|---|---|---|
-| **Access Token** (JWT) | 15 minutes | Memory (JS variable / React state) | Sent with every API request |
-| **Refresh Token** (JWT) | 7 days | httpOnly cookie | Used to issue new access tokens silently |
-
-**Why this way:**
-- Access token in memory: not vulnerable to XSS (no localStorage).
-- Refresh token in httpOnly cookie: not accessible by JavaScript, so XSS-safe.
-- Short-lived access token limits damage if intercepted.
-
-### 6.2 Auth Middleware
-
-```typescript
-// middleware/auth.ts
-
-export const protect = asyncHandler(async (req, res, next) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) throw new ApiError(401, 'Not authenticated');
-
-  const decoded = jwt.verify(token, process.env.JWT_SECRET);
-  req.user = await User.findById(decoded.id).select('-passwordHash');
-  if (!req.user || !req.user.isActive) throw new ApiError(401, 'User not found or suspended');
-
-  next();
-});
-
-export const requireRole = (...roles: string[]) => (req, res, next) => {
-  if (!roles.includes(req.user.role)) throw new ApiError(403, 'Forbidden');
-  next();
-};
-
-// Usage in routes
-router.put('/providers/:id/approve', protect, requireRole('admin'), adminController.approveProvider);
-router.post('/bookings', protect, requireRole('customer'), bookingController.create);
-```
-
-### 6.3 Email Verification Flow
-
-```
-Register → hash password → save user (isVerified: false)
-→ generate verificationToken (crypto.randomBytes) → store hashed token on user
-→ send email with link: /verify-email/:rawToken
-→ User clicks link → GET /api/auth/verify-email/:token
-→ Hash incoming token → find user with matching hash → set isVerified: true
-```
-
----
-
-## 7. Geolocation Architecture
-
-### 7.1 How Provider Discovery Works
-
-**Step 1 — Provider stores location:**
-When a provider sets up their profile, the frontend requests their browser location (or they enter an address geocoded via browser). This is saved as a GeoJSON Point:
 ```json
 {
-  "location": {
-    "type": "Point",
-    "coordinates": [73.0479, 31.4504]   // [longitude, latitude] — MongoDB order
-  },
-  "serviceRadius": 15
-}
-```
-
-**Step 2 — Customer triggers discovery:**
-On the homepage, the browser requests location via `navigator.geolocation.getCurrentPosition()`. The coordinates go into Zustand state and are sent as query params.
-
-**Step 3 — Geospatial MongoDB query:**
-```typescript
-// geo.service.ts
-export const findNearbyProviders = async ({
-  lat, lng, radiusKm, categoryId, sort, minRating, page, limit
-}) => {
-  const radiusMeters = radiusKm * 1000;
-
-  const geoQuery = {
-    location: {
-      $near: {
-        $geometry: { type: 'Point', coordinates: [lng, lat] },
-        $maxDistance: radiusMeters,
-      }
-    },
-    isApproved: true,
-    isAvailable: true,
-    ...(minRating && { avgRating: { $gte: minRating } }),
-  };
-
-  const providers = await ProviderProfile.find(geoQuery)
-    .populate('userId', 'name avatar')
-    .skip((page - 1) * limit)
-    .limit(limit);
-
-  // Add distance to each result
-  return providers.map(p => ({
-    ...p.toObject(),
-    distanceKm: calculateDistance(lat, lng, p.location.coordinates[1], p.location.coordinates[0])
-  }));
-};
-```
-
-**Step 4 — Distance calculation:**
-The `$near` operator sorts by distance automatically. We also compute the human-readable distance (e.g. "3.2 km away") using the Haversine formula:
-```typescript
-export const calculateDistance = (lat1, lng1, lat2, lng2): number => {
-  const R = 6371; // Earth's radius in km
-  const dLat = toRad(lat2 - lat1);
-  const dLng = toRad(lng2 - lng1);
-  const a = Math.sin(dLat/2) ** 2 +
-            Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng/2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-};
-```
-
-### 7.2 Provider Radius Filtering
-
-A provider with `serviceRadius: 15` should only appear if the customer is within 15 km of the provider. The `$maxDistance` in the query is set from the customer's perspective to the maximum allowed radius. Providers with a smaller radius than the customer's distance will naturally not appear.
-
-However, for providers with varying radii, we use an additional `$geoWithin` check:
-```typescript
-// Filter: customer location must be within the provider's service circle
-ProviderProfile.find({
-  location: {
-    $geoWithin: {
-      $centerSphere: [[customerLng, customerLat], radiusKm / 6371]
-    }
-  }
-})
-```
-
-The correct approach: query `$near` first for ordering by distance, then filter on `serviceRadius` — or use a pipeline with `$geoNear` in aggregation for more control.
-
----
-
-## 8. Payment Architecture
-
-### 8.1 Escrow Model with Stripe
-
-LocalServe uses a **platform escrow** model:
-1. Customer pays → money lands in the **LocalServe Stripe account**.
-2. Money sits there until service is confirmed.
-3. On customer confirmation → LocalServe **transfers** `providerAmount` to the **provider's Stripe Connect account**.
-4. `platformFee` stays in LocalServe's account as revenue.
-
-This avoids the complexity of "uncaptured PaymentIntents" and works cleanly with Stripe Connect.
-
-### 8.2 Stripe Connect Setup
-
-Each provider must connect a Stripe account (Express account type — easiest for providers):
-
-```
-Provider clicks "Connect Stripe" →
-POST /api/payments/stripe/onboard →
-  Stripe creates Express account → returns onboarding URL →
-  Provider redirected to Stripe's hosted onboarding →
-  Provider completes → redirected back to LocalServe →
-GET /api/payments/stripe/status → check if charges_enabled: true
-```
-
-This is required before a provider can receive any payouts.
-
-### 8.3 Full Payment Flow
-
-```
-1. BOOKING ACCEPTED
-   Provider accepts booking → sets price
-   Booking status: pending → accepted
-
-2. PAYMENT INITIATION
-   Customer clicks "Pay Now"
-   POST /api/payments/create-intent { bookingId }
-     → Calculate: totalAmount, platformFee (10%), providerAmount
-     → Save amounts on Booking document
-     → Create Stripe PaymentIntent: amount = totalAmount
-     → Return { clientSecret } to frontend
-
-3. PAYMENT CAPTURE (frontend)
-   Stripe Elements collects card details
-   stripe.confirmPayment({ clientSecret })
-     → Stripe captures payment to LocalServe account
-     → Stripe fires webhook: payment_intent.succeeded
-
-4. WEBHOOK HANDLER
-   POST /api/payments/webhook (raw body, verified with Stripe signature)
-   Event: payment_intent.succeeded
-     → Find booking by paymentIntentId
-     → Set booking.status = 'paid'
-     → Set booking.paymentStatus = 'paid'
-     → Set autoReleaseAt = now + 4 days
-     → Send email to customer (payment confirmed) + provider (booking paid)
-
-5. SERVICE COMPLETION
-   Provider marks in_progress → marks completed
-   Customer confirms completion
-   PUT /api/bookings/:id/confirm
-     → Verify customer owns this booking
-     → Transfer providerAmount to provider's Stripe Connect account
-       stripe.transfers.create({
-         amount: providerAmount * 100,  // in cents
-         currency: 'usd',
-         destination: provider.stripeAccountId,
-         transfer_group: bookingId
-       })
-     → Set booking.status = 'confirmed', paymentStatus = 'released'
-     → Send payout confirmation email to provider
-
-6. AUTO-RELEASE (if customer never confirms)
-   A cron job runs daily checking autoReleaseAt < now && status === 'completed'
-   → Automatically triggers the same transfer logic as step 5
-```
-
-### 8.4 Refund Flow
-
-```
-Provider cancels after payment OR admin resolves dispute with refund:
-  → stripe.refunds.create({ payment_intent: paymentIntentId, amount: refundAmount })
-  → Set booking.status = 'refunded', paymentStatus = 'refunded'
-  → Notify customer
-```
-
-### 8.5 Webhook Security
-
-```typescript
-// payment.routes.ts — raw body needed for Stripe signature verification
-router.post('/webhook', express.raw({ type: 'application/json' }), paymentController.handleWebhook);
-
-// payment.controller.ts
-const sig = req.headers['stripe-signature'];
-const event = stripe.webhooks.constructEvent(req.body, sig, process.env.STRIPE_WEBHOOK_SECRET);
-```
-
-Webhooks are **idempotent**: check if the action has already been applied before processing, using the event ID stored in the database.
-
-### 8.6 Commission Calculation
-
-```typescript
-// utils/constants.ts
-export const PLATFORM_COMMISSION = Number(process.env.PLATFORM_COMMISSION_PERCENT || 10) / 100;
-
-// When provider accepts a booking and sets price:
-const totalAmount = servicePrice;
-const platformFee = Math.round(totalAmount * PLATFORM_COMMISSION * 100) / 100;
-const providerAmount = totalAmount - platformFee;
-```
-
----
-
-## 9. File Upload Architecture
-
-### 9.1 Upload Flow
-
-```
-Client selects file →
-Multer (in-memory storage) receives file on server →
-Upload to Cloudinary via cloudinary.uploader.upload() →
-Get back secure_url (CDN-hosted) →
-Store URL in MongoDB
-```
-
-### 9.2 Multer + Cloudinary Config
-
-```typescript
-// middleware/upload.ts
-import multer from 'multer';
-import { v2 as cloudinary } from 'cloudinary';
-import { CloudinaryStorage } from 'multer-storage-cloudinary';
-
-const storage = new CloudinaryStorage({
-  cloudinary,
-  params: {
-    folder: 'localserve/providers',
-    allowed_formats: ['jpg', 'jpeg', 'png', 'webp'],
-    transformation: [{ width: 800, height: 800, crop: 'limit', quality: 'auto' }]
-  }
-});
-
-export const uploadImage = multer({
-  storage,
-  limits: { fileSize: 5 * 1024 * 1024 }  // 5MB limit
-});
-```
-
-File size limits and format restrictions are enforced at the middleware level.
-
----
-
-## 10. Email Architecture
-
-### 10.1 Why Resend
-
-Resend has a clean Node.js SDK, React Email support, 3000 emails/month free, and does not require domain verification for testing. Each email type is a separate template function.
-
-### 10.2 Email Service
-
-```typescript
-// services/email.service.ts
-import { Resend } from 'resend';
-const resend = new Resend(process.env.RESEND_API_KEY);
-
-const FROM = 'LocalServe <noreply@localserve.app>';
-
-export const sendBookingRequestEmail = async (provider: IUser, booking: IBooking) => {
-  await resend.emails.send({
-    from: FROM,
-    to: provider.email,
-    subject: 'New Booking Request',
-    html: bookingRequestTemplate(provider.name, booking),
-  });
-};
-
-export const sendBookingAcceptedEmail = async (customer: IUser, booking: IBooking) => { ... };
-export const sendPaymentConfirmationEmail = async (customer: IUser, booking: IBooking) => { ... };
-export const sendPayoutNotificationEmail = async (provider: IUser, amount: number) => { ... };
-export const sendDisputeOpenedEmail = async (admin: IUser, dispute: IDispute) => { ... };
-export const sendVerificationEmail = async (user: IUser, token: string) => { ... };
-export const sendPasswordResetEmail = async (user: IUser, token: string) => { ... };
-```
-
----
-
-## 11. Security Architecture
-
-### 11.1 Express Security Middleware Stack
-
-```typescript
-// app.ts — middleware applied in this exact order
-app.use(helmet());                           // Sets secure HTTP headers
-app.use(cors({ origin: process.env.CLIENT_URL, credentials: true }));
-app.use(mongoSanitize());                    // Strips $ and . from req.body (NoSQL injection)
-app.use(express.json({ limit: '10kb' }));    // Limit body size
-app.use(cookieParser());
-```
-
-### 11.2 Rate Limiting
-
-```typescript
-// Different limits for different routes
-const authLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 10 });   // 10/15min on auth
-const apiLimiter = rateLimit({ windowMs: 15 * 60 * 1000, max: 100 });   // 100/15min on API
-
-app.use('/api/auth', authLimiter);
-app.use('/api', apiLimiter);
-```
-
-### 11.3 Input Validation
-
-All request bodies are validated with Zod before reaching controllers:
-
-```typescript
-// validators/booking.validator.ts
-export const createBookingSchema = z.object({
-  serviceId: z.string().regex(/^[0-9a-fA-F]{24}$/, 'Invalid service ID'),
-  scheduledAt: z.string().datetime(),
-  description: z.string().max(500).optional(),
-  serviceAddress: z.string().max(200).optional(),
-});
-
-// middleware/validate.ts
-export const validate = (schema: ZodSchema) => (req, res, next) => {
-  const result = schema.safeParse(req.body);
-  if (!result.success) throw new ApiError(400, 'Validation failed', result.error.errors);
-  req.body = result.data;
-  next();
-};
-```
-
-### 11.4 Authorization Checks
-
-Resource ownership is always verified server-side. Never trust the client:
-
-```typescript
-// booking.controller.ts — confirm completion
-export const confirmCompletion = asyncHandler(async (req, res) => {
-  const booking = await Booking.findById(req.params.id);
-
-  // Must exist
-  if (!booking) throw new ApiError(404, 'Booking not found');
-
-  // Must be the customer
-  if (booking.customerId.toString() !== req.user._id.toString())
-    throw new ApiError(403, 'Not authorized');
-
-  // Must be in the right state
-  if (booking.status !== 'completed')
-    throw new ApiError(400, 'Booking is not in completed state');
-
-  // Now safe to proceed with payout
-  await paymentService.releasePayment(booking);
-});
-```
-
-### 11.5 Booking State Machine
-
-The state machine is enforced exclusively on the server. No status transition is allowed unless the server validates it. Each `PUT /:id/[action]` endpoint checks the current status before allowing the change:
-
-```
-pending       → accepted (provider only)
-pending       → rejected (provider only)
-pending       → cancelled (customer only, before acceptance)
-accepted      → paid (stripe webhook only)
-paid          → in_progress (provider only)
-paid          → cancelled (either party, triggers refund)
-in_progress   → completed (provider only)
-completed     → confirmed (customer only, triggers payout)
-completed     → disputed (customer only)
-confirmed     → [terminal]
-disputed      → resolved by admin
-```
-
----
-
-## 12. Error Handling
-
-### 12.1 Custom Error Class
-
-```typescript
-// utils/ApiError.ts
-export class ApiError extends Error {
-  statusCode: number;
-  errors: any[];
-
-  constructor(statusCode: number, message: string, errors: any[] = []) {
-    super(message);
-    this.statusCode = statusCode;
-    this.errors = errors;
+  "error": {
+    "code": "SLOT_UNAVAILABLE",
+    "message": "The requested time is no longer available.",
+    "fieldErrors": {},
+    "requestId": "..."
   }
 }
 ```
 
-### 12.2 Global Error Handler
+Expected status codes are `400` malformed request, `401` unauthenticated, `403` forbidden, `404` hidden/not found, `409` state or uniqueness conflict, `422` valid shape but failed domain rule, `429` rate limited, and `500` unexpected error. Production-like responses expose no stack traces.
 
-```typescript
-// middleware/errorHandler.ts
-export const globalErrorHandler = (err, req, res, next) => {
-  const statusCode = err.statusCode || 500;
-  const message = err.message || 'Internal Server Error';
+## 9. Authentication, Sessions, and CSRF
 
-  // Log full error in dev, minimal in prod
-  if (process.env.NODE_ENV === 'development') console.error(err);
+- Passwords are hashed with Argon2id using reviewed parameters; login and recovery routes are rate limited.
+- Login is allowed only after email verification; resend-verification remains available without an authenticated session and is rate limited.
+- Access tokens are short-lived (15 minutes) and held in client memory only.
+- Refresh tokens are 256-bit opaque random values in an `HttpOnly`, `Secure`, `SameSite=Strict`, path-scoped cookie.
+- Only a SHA-256 refresh-token hash is stored. Refresh rotates the token atomically; reuse revokes the entire family.
+- Logout revokes the current session; password reset and account suspension revoke all sessions.
+- Cookie-authenticated mutation routes validate an origin allowlist and a CSRF token. Stripe webhook routes use the raw body and Stripe signature instead.
+- The Vercel client calls relative `/api/v1`; rewrites proxy to Render. Local Vite development uses the same relative path through its proxy.
 
-  res.status(statusCode).json({
-    success: false,
-    message,
-    errors: err.errors || [],
-    ...(process.env.NODE_ENV === 'development' && { stack: err.stack }),
-  });
-};
+This same-origin design is required. A browser configured to call a separate Render origin directly is not a supported deployment.
+
+## 10. Authorization
+
+Authorization is enforced in application services, never inferred from UI visibility.
+
+| Resource/action | Rule |
+|---|---|
+| Public discovery | Only approved, unsuspended providers with `acceptingNewBookings=true` and active services; general-area label and calculated distance only. |
+| Provider editing | The profile owner; material edits reset approval to `pending`. |
+| Service management | Profile owner with a provider profile; only approved profiles are publicly visible. |
+| Booking read | Customer, booked provider, or admin. |
+| Booking create | Authenticated customer; the selected service must not belong to that customer's provider profile. |
+| Accept/reject/start/finish | Booked provider with state/time prerequisites. Acceptance also requires approved profile, `acceptingNewBookings=true`, effective availability, and payout-capable test Connect account. |
+| Pay/confirm/customer cancel/review | Booked customer with state/time prerequisites; review additionally requires no active dispute. |
+| Customer service address and booking-party contact | Booking parties and admin, only after successful payment except the customer may always see data they supplied. A provider's private origin/address is never disclosed to the other party. |
+| Approval/dispute resolution/suspension | Admin only; audit required. |
+
+Suspension removes a provider from discovery, revokes sessions, and blocks every protected action, including acceptance and fulfillment. It does not erase existing bookings or financial records; administrators must resolve affected paid bookings through the documented cancellation or dispute path.
+
+## 11. Geospatial Search and Privacy
+
+Provider origins and booking coordinates use GeoJSON longitude-first order: `[longitude, latitude]`, WGS84. The discovery repository uses `$geoNear`/`$nearSphere`, bounded radius, indexed filters, deterministic secondary sorting, and cursor pagination.
+
+The browser may request geolocation only after user action. Manual search sends text to `GET /api/v1/locations/search`; the server-side Mapbox adapter returns a constrained set of place labels and coordinates. Tokens are restricted by scope and environment.
+
+Creating a booking requires a normalized service address and coordinates. The server recomputes the spherical distance to the provider snapshot origin and rejects a location outside the service radius. Client-supplied distance is never trusted.
+
+Public DTOs contain only the provider's general-area label and calculated distance, never exact, rounded, or coarsened provider coordinates. Pre-payment booking DTOs hide provider direct contact and the other party's exact address. Post-payment party DTOs disclose only what is necessary to perform the service.
+
+## 12. Stripe Test-Mode Architecture
+
+### 12.1 Connect onboarding
+
+Providers receive a Stripe Express connected account in test mode. The API creates single-use account links and reads capability/account state from Stripe; the client does not assert onboarding completion. Provider acceptance requires charges/transfers readiness needed by the selected test flow.
+
+### 12.2 Charge and delayed transfer
+
+1. Provider accepts; the server calculates the payment deadline as the earlier of 24 hours after acceptance and 2 hours before start.
+2. Customer requests a PaymentIntent. The server derives amount from the immutable booking snapshot and uses a deterministic Stripe idempotency key.
+3. Stripe.js confirms payment with test credentials.
+4. A signed webhook, not the browser redirect, marks payment succeeded and booking scheduled.
+5. After completion and with no active dispute, the worker creates a separate transfer to the connected account.
+
+For `grossAmountCents = G` and `commissionBps = 1000`:
+
+```text
+platformFeeCents = floor((G * 1000 + 5000) / 10000)
+providerAmountCents = G - platformFeeCents
 ```
 
-### 12.3 Async Handler
+The exact algorithm and 10% rate are stored on the booking. No endpoint or copy may call this escrow.
 
-```typescript
-// utils/asyncHandler.ts
-export const asyncHandler = (fn: Function) => (req, res, next) =>
-  Promise.resolve(fn(req, res, next)).catch(next);
+### 12.3 Webhook processing
+
+The webhook handler must preserve the raw request body, verify the signing secret, insert the Stripe event ID under a unique constraint, enqueue processing, and return quickly. Duplicate delivery is successful no-op behavior. Event handlers fetch canonical Stripe objects when ordering or completeness is uncertain and only advance valid states. A verified late payment success for a `cancelled` or `expired` booking queues one full refund and never reopens the booking.
+
+Relevant event families include PaymentIntent success/failure, refunds, account updates, transfers, and reversals. A reconciliation worker periodically checks nonterminal local payments/transfers against Stripe test mode.
+
+### 12.4 Refunds and reversals
+
+Eligible cancellation creates a full Stripe refund. A dispute resolution may create a full or partial refund, and cumulative successful refunds must never exceed the original charge.
+
+For cumulative successful refunds of `R`, derive the cumulative allocation target:
+
+```text
+cumulativeCommissionReductionCents = floor((R * commissionBps + 5000) / 10000)
+cumulativeProviderRecoveryCents = R - cumulativeCommissionReductionCents
+currentCommissionReductionCents = cumulativeCommissionReductionCents - priorCommissionReductionCents
+currentProviderRecoveryCents = cumulativeProviderRecoveryCents - priorProviderRecoveryCents
 ```
 
-Every controller is wrapped with `asyncHandler`. No try/catch in controllers.
+`R` must never exceed the original gross charge. Computing each current delta from cumulative targets prevents cent-level rounding drift across multiple partial refunds. If no transfer exists, release is permanently blocked or reduced to the remaining provider entitlement. If a transfer was released, the worker requests a reversal up to `currentProviderRecoveryCents`, bounded by the unreversed transferred amount. A partial recovery changes transfer state to `partially_reversed`; complete recovery changes it to `reversed`. Refund and reversal attempts, errors, Stripe references, and idempotency keys are recorded independently. A post-completion dispute leaves the booking `completed` while its financial and dispute records show the adjustment.
 
----
+## 13. Background Processing and Outbox
 
-## 13. Deployment Architecture
+Domain transactions write outbox events with business state. A separate worker claims available events using atomic `findOneAndUpdate`, a unique worker ID, and a lease expiry. Handlers must tolerate at-least-once delivery and persist external idempotency keys.
 
-### 13.1 Architecture
+Required scheduled jobs:
 
-```
-                    ┌──────────────┐
-                    │    GitHub    │
-                    │  (monorepo)  │
-                    └──────┬───────┘
-                    push   │
-               ┌───────────┴──────────┐
-               ▼                      ▼
-        ┌────────────┐         ┌───────────┐
-        │   Vercel   │         │   Render  │
-        │ (frontend) │         │ (backend) │
-        │   auto     │         │   auto    │
-        │  deploys   │         │  deploys  │
-        └────────────┘         └───────────┘
-                                     │
-                    ┌────────────────┼─────────────────┐
-                    ▼                ▼                 ▼
-             ┌──────────┐    ┌────────────┐   ┌──────────────┐
-             │ MongoDB  │    │ Cloudinary │   │    Resend    │
-             │  Atlas   │    │  (files)   │   │   (email)    │
-             └──────────┘    └────────────┘   └──────────────┘
-```
+- expire `requested` bookings at `min(createdAt + 24 hours, scheduledStart - 2 hours)`;
+- expire unpaid accepted bookings at `min(acceptedAt + 24 hours, scheduledStart - 2 hours)` and release both parties' locks;
+- auto-complete 72 hours after provider finish when no dispute is active;
+- create eligible Stripe test transfers;
+- create refunds for late payment success on cancelled/expired bookings;
+- execute proportional transfer reversals required by dispute refunds;
+- retry email and external operations with capped exponential backoff and jitter;
+- reconcile stuck payment and transfer records;
+- recover abandoned leases and flag exhausted jobs for admin inspection.
 
-### 13.2 Environment Variables
+No keep-alive ping may be used to defeat free-host sleeping. Jobs resume safely after cold starts because deadlines and leases are persisted.
 
-**Backend (`.env`):**
-```
-NODE_ENV=development
-PORT=5000
+## 14. Email and Files
 
-# Database
-MONGODB_URI=mongodb+srv://...
+Resend is accessed through an email adapter. Emails are generated from versioned templates and triggered from the outbox for verification, password reset, provider-profile approval/rejection, booking request/accept/reject, payment success, cancellation, service completion, dispute updates, refund, and transfer-release events. Delivery failure must not roll back committed business state. The MVP has no in-app notification collection or real-time notification transport.
 
-# JWT
-JWT_SECRET=your-long-random-secret
-JWT_REFRESH_SECRET=another-long-random-secret
-JWT_ACCESS_EXPIRY=15m
-JWT_REFRESH_EXPIRY=7d
+User-uploaded media is not required for MVP completion. Seeded profiles may reference repository-owned static assets or fixed HTTPS demo assets. There is no MVP upload endpoint and the API never stores image bytes in MongoDB. Adding user uploads or arbitrary remote image URLs requires an explicit architecture revision covering storage, validation, authorization, and deletion.
 
-# Stripe
-STRIPE_SECRET_KEY=sk_test_...
-STRIPE_PUBLISHABLE_KEY=pk_test_...
-STRIPE_WEBHOOK_SECRET=whsec_...
+## 15. Express and Security Pipeline
 
-# Cloudinary
-CLOUDINARY_CLOUD_NAME=...
-CLOUDINARY_API_KEY=...
-CLOUDINARY_API_SECRET=...
+Middleware order is normative:
 
-# Email
-RESEND_API_KEY=re_...
+1. trusted-proxy and request/correlation ID;
+2. structured access logging with redaction;
+3. security headers and strict CORS/origin policy;
+4. Stripe webhook raw-body route;
+5. bounded JSON and form parsers;
+6. cookie parsing and CSRF/origin checks;
+7. global and sensitive-route rate limits;
+8. authentication and route handlers;
+9. not-found and centralized error handling.
 
-# App
-CLIENT_URL=http://localhost:5173
-PLATFORM_COMMISSION_PERCENT=10
-AUTO_RELEASE_DAYS=4
-```
+Validation schemas reject unknown sensitive fields. Mongo query objects are built from allowlisted values; user input is never spread into a query or update. Updates use explicit `$set` fields and validators. Helmet headers, CSP compatible with Stripe, TLS, secret separation, dependency scanning, and OWASP-aligned tests are required.
 
-**Frontend (`.env`):**
-```
-VITE_API_URL=http://localhost:5000/api
-VITE_STRIPE_PUBLISHABLE_KEY=pk_test_...
-```
+## 16. Errors, Logging, Health, and Metrics
 
-### 13.3 Free Tier Constraints to Know
+Logs are structured JSON containing timestamp, level, service, environment, request ID, route template, status, latency, safe user/booking IDs, event name, and error code. They exclude authorization headers, cookies, tokens, passwords, exact addresses, and payment method details.
 
-| Service | Free Tier Limit | What to Watch |
-|---|---|---|
-| MongoDB Atlas M0 | 512 MB storage, shared cluster | Fine for dev + light production |
-| Render (Web Service) | 750 hrs/month, spins down after 15 min inactivity | Add a ping cron to keep alive |
-| Vercel | 100 GB bandwidth / month | More than enough |
-| Cloudinary | 25 GB storage, 25 GB bandwidth | Fine for portfolio project |
-| Resend | 3,000 emails/month, 100/day | Fine for dev |
-| Stripe | No monthly fee, 2.9% + 30¢ per transaction | Use test mode for dev |
+`/health/live` reports process liveness without dependency calls. `/health/ready` checks MongoDB and critical configuration with a short timeout. Neither returns secrets or detailed topology.
 
----
+At minimum track request/error latency, authentication failures, booking transition failures, outbox depth/age/retries, webhook failures, payment/transfer reconciliation mismatches, and email failures. For a portfolio deployment, provider dashboards may supply infrastructure metrics; domain metrics remain structured application events.
 
-## 14. Development Workflow
+## 17. Frontend Architecture
 
-### 14.1 Setup Sequence
+- TanStack Query owns server state; Zustand holds only ephemeral client state such as session presentation and filters. Server entities must not be duplicated as long-lived Zustand stores.
+- A single typed API client uses relative `/api/v1`, attaches the access token, performs one coordinated refresh attempt on `401`, and never loops refreshes.
+- Route loaders/guards improve navigation but are not security boundaries.
+- Zod schemas may be shared or generated, but the server remains authoritative.
+- Feature folders own screens, query keys, forms, and mutations. Shared UI primitives implement consistent focus, error, loading, empty, and disabled states.
+- All core workflows must meet WCAG 2.2 AA: keyboard access, visible focus, semantic labels, status announcements, contrast, reduced motion, and responsive layouts.
+- Discovery URLs preserve shareable filters. Exact coordinates and contact details must not be persisted to local storage or analytics.
 
-```bash
-# 1. Clone repo
-git clone https://github.com/yourusername/localserve.git
-cd localserve
+The current oversized client bundle should be split by route/feature. Performance targets from the specification are measured on a production build after a Render cold-start warm-up is reported separately.
 
-# 2. Backend setup
-cd server && npm install
-cp .env.example .env
-# Fill in .env values
-npm run dev          # ts-node-dev with hot reload
+## 18. Configuration
 
-# 3. Frontend setup
-cd ../client && npm install
-cp .env.example .env
-npm run dev          # Vite dev server at :5173
+Configuration is parsed and validated at startup. The process fails fast for missing required values.
 
-# 4. Stripe webhook (local testing)
-# Install Stripe CLI
-stripe listen --forward-to localhost:5000/api/payments/webhook
-```
+| Concern | Required configuration |
+|---|---|
+| Core | `NODE_ENV`, `PORT`, `APP_ORIGIN`, `MONGODB_URI`, access-token signing keys |
+| Auth | access/refresh lifetimes, password-reset and verification secrets/URLs |
+| Stripe | test secret key, publishable key exposed only to client, webhook secret, Connect return/refresh URLs |
+| Mapbox | server token and search country/bounds policy |
+| Email | Resend key, sender identity |
+| Jobs | worker ID, lease duration, retry limits, schedule intervals |
 
-### 14.2 Key npm Scripts
+The product time constants in section 7.2 are committed domain constants and must not vary by environment. Changing one requires matching specification and architecture revisions.
 
-**Backend:**
-```json
-{
-  "dev": "ts-node-dev --respawn --transpile-only src/server.ts",
-  "build": "tsc",
-  "start": "node dist/server.js",
-  "seed": "ts-node src/scripts/seed.ts"
-}
-```
+Development uses `.env` ignored by Git; CI and hosting use secret stores. `.env.example` contains names and safe explanations only. Startup must reject live-mode Stripe keys for this project.
 
-**Frontend:**
-```json
-{
-  "dev": "vite",
-  "build": "tsc && vite build",
-  "preview": "vite preview",
-  "lint": "eslint src --ext .ts,.tsx"
-}
-```
+## 19. Deployment Topology
 
-### 14.3 Recommended Build Order
+There are three environments: local development, CI test, and public portfolio demo. There is intentionally no production real-money environment.
 
-Build the app in this sequence to avoid blocking yourself:
+- Vercel serves the static client and rewrites `/api/v1/*` to the Render API.
+- Render runs the API and one logical leased worker loop from the same server artifact and web-service process for the portfolio demo. Local development and CI may launch the worker separately. Free-host sleep may delay deadline processing; on startup the worker immediately claims overdue jobs. Persisted deadlines, leases, and idempotency preserve correctness, and the UI may disclose that demo automation resumes after cold start.
+- MongoDB Atlas supplies a replica set because transactions are required.
+- Stripe is test mode only; Resend and Mapbox use restricted demo credentials.
+- Database migrations/index creation run as an explicit deployment step, not implicitly from every web replica. `autoIndex` is disabled in the demo runtime after indexes are provisioned.
 
-```
-Phase 1 — Foundation
-  ├── DB connection + all Mongoose models
-  ├── User auth (register, login, JWT, email verify)
-  └── Role-based middleware
+The demo UI must visibly label test payments and may disclose cold-start delay. Seed data is fictional, repeatable, and contains no personal data.
 
-Phase 2 — Core Provider Flow
-  ├── Provider profile CRUD
-  ├── Service listings
-  ├── Geospatial provider discovery endpoint
-  └── Admin: provider approval
+## 20. Verification and CI Gates
 
-Phase 3 — Booking Flow
-  ├── Booking creation (customer)
-  ├── Accept/reject (provider)
-  ├── Status lifecycle endpoints
-  └── Email notifications at each step
+Every pull request must run formatting/checks, client and server lint, TypeScript builds, unit tests, integration tests against an isolated MongoDB replica set, and dependency/security scanning. Main-branch demo deployment additionally runs Playwright smoke tests.
 
-Phase 4 — Payments
-  ├── Stripe Connect onboarding (provider)
-  ├── PaymentIntent creation
-  ├── Stripe Elements on frontend
-  ├── Webhook handler
-  └── Payout / transfer on completion
+Required test layers:
 
-Phase 5 — Reviews & Disputes
-  ├── Review submission + rating update
-  └── Dispute creation + admin resolution
+| Layer | Coverage |
+|---|---|
+| Unit | money rounding, deadlines, transition guards, distance/radius, privacy serializers, commission and refund policy. |
+| Integration | auth rotation/reuse, authorization, geospatial discovery, concurrent slot acceptance, outbox leasing, webhook deduplication, transactional state changes. |
+| Contract | request/response schemas and stable error codes for `/api/v1`. |
+| End-to-end | dual-capability onboarding, admin approval, discovery, request/accept/pay, finish/confirm/review, cancellation/refund, dispute freeze. |
+| Accessibility | automated axe checks plus keyboard/manual review of core journeys. |
 
-Phase 6 — Admin Panel
-  └── All admin routes + basic UI
+Stripe tests use official test clocks/events where useful and signed webhook fixtures. External adapter unit tests never call live services. A portfolio release is complete only when the acceptance scenarios in the specification pass.
 
-Phase 7 — Polish
-  ├── In-app notifications
-  ├── Loading states, error boundaries
-  └── Responsive design pass
-```
+## 21. Implementation Sequence
 
----
+Implementation should proceed in this order:
 
-*End of Architecture Document v1.0*
+1. Establish CI, lint/build cleanliness, test harnesses, validated configuration, `/api/v1`, error envelope, and serializers.
+2. Correct the account/provider model and persisted rotating refresh sessions.
+3. Implement provider approval, services, exact/approximate location separation, and indexed discovery.
+4. Implement booking snapshots, explicit command transitions, schedule locks, deadlines, and outbox worker.
+5. Integrate Stripe Connect test onboarding, PaymentIntents, signed webhooks, refunds, delayed transfers, reversals, and reconciliation.
+6. Complete disputes, reviews, admin audit tools, notifications, accessibility, observability, seed data, and demo deployment.
+
+Future implementation must not preserve a parallel contract that conflicts with these documents. This documentation review makes no claim about the current implementation state and authorizes no code change by itself.
+
+## 22. Normative Engineering References
+
+Implementation choices should be checked against the current primary documentation for Stripe Connect and webhooks, MongoDB geospatial indexes and transactions, OAuth 2.0 refresh-token replay guidance (RFC 9700), MDN cookie behavior, OWASP ASVS/Cheat Sheets, WCAG 2.2, Express 5, Mongoose, Vite, Vercel rewrites, and Render service behavior.
+
+Vendor behavior can change. Before implementing an integration phase, confirm the relevant current official documentation and record any architecture-changing result as a new ADR.
